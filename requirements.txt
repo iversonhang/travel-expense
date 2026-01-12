@@ -3,3 +3,5 @@ google-genai
 Pillow
 supabase-py
 streamlit==1.30.0
+# ... 其他 Streamlit/Gemini 依賴 ...
+pygithub  # GitHub API Python 函式庫
