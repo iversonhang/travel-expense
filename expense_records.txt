@@ -1,2 +1,3 @@
 [2026-01-12 07:34:20] User: TSH, Shop: 7-11, Total: 2000.00 JPY, Date: 2026-01-12, Remarks: , Shared: No, Conversion: Original: 2000.0 JPY. 轉換失敗，使用原始值記錄。
 [2026-01-12 07:45:36] User: TSH, Shop: a, Total: 49.32 HKD, Date: 2026-01-12, Remarks: , Shared: No, OriginalCurrency: JPY, Conversion: Original: 1000.0 JPY. Converted to 49.32 HKD (Rate: 1:0.0493)
+[2026-01-12 08:38:29] User: TWH, Shop: 7-11, Total: 493.20 HKD, Date: 2026-01-12, Remarks: , Shared: No, OriginalAmount: 10000.00, OriginalCurrency: JPY, Conversion: Original: 10000.0 JPY. Converted to 493.20 HKD (Rate: 1:0.0493)
