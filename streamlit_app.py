@@ -5,7 +5,6 @@ import base64
 import re
 import pandas as pd
 from datetime import datetime, date
-from io import BytesIO
 
 # 外部依賴
 from dotenv import load_dotenv 
@@ -30,16 +29,15 @@ REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 # 貨幣轉換設定
-BASE_CURRENCY = "JPY"
+BASE_CURRENCY = "HKD"
 TARGET_CURRENCIES = ["HKD", "JPY"]
 AVAILABLE_CURRENCIES = ["HKD", "JPY"] # 用於編輯表單
 
-# --- Session State 初始化 (用於編輯/刪除) ---
+# --- Session State 初始化 (用於編輯/刪除/緩存) ---
 if 'edit_id' not in st.session_state:
     st.session_state.edit_id = None
 if 'delete_confirm_id' not in st.session_state:
     st.session_state.delete_confirm_id = None
-# 使用 Session State 緩存 DataFrame，減少 GitHub API 讀取次數
 if 'df_records' not in st.session_state:
     st.session_state.df_records = pd.DataFrame()
 
@@ -75,7 +73,7 @@ RECEIPT_SCHEMA = types.Schema(
 # --- 2. 匯率轉換函數 ---
 @st.cache_data(ttl=3600)
 def convert_currency(amount, from_currency):
-    """將金額轉換為基礎貨幣 (JPY)"""
+    """將金額轉換為基礎貨幣 (HKD)"""
     if from_currency == BASE_CURRENCY:
         return amount, BASE_CURRENCY, 1.0
     try:
@@ -125,11 +123,11 @@ def read_full_content():
 
 
 def write_to_github_file(record_data):
-    """將單條記錄追加寫入 TXT 檔案"""
+    """將單條記錄追加寫入 TXT 檔案 (包含 Shared 狀態)"""
     if not GITHUB_TOKEN: return False
 
     try:
-        # 將記錄轉換為單行文本格式
+        # 將記錄轉換為單行文本格式 (新增 Shared)
         record_text = (
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"User: {record_data['user_name']}, "
@@ -137,6 +135,7 @@ def write_to_github_file(record_data):
             f"Total: {record_data['total_amount']:.2f} {record_data['currency']}, "
             f"Date: {record_data['transaction_date']}, "
             f"Remarks: {record_data['remarks']}, "
+            f"Shared: {record_data.get('is_shared', 'No')}, " # <-- 新增此欄位
             f"Conversion: {record_data.get('conversion_notes', 'N/A')}\n"
         )
         
@@ -168,6 +167,7 @@ def read_and_parse_records_to_df(cache_buster):
     if not content: return pd.DataFrame()
 
     records = []
+    # 匹配 TXT 檔案中包含 Shared 和 Conversion 信息的結構
     pattern = re.compile(
         r'^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] '
         r'User: (?P<User>.*?), '
@@ -175,6 +175,7 @@ def read_and_parse_records_to_df(cache_buster):
         r'Total: (?P<Total>.*?)\s*(?P<Currency>[A-Z]{3}?), '
         r'Date: (?P<Date>\d{4}-\d{2}-\d{2}), '
         r'Remarks: (?P<Remarks>.*?), '
+        r'Shared: (?P<Shared>.*?),\s*' # <-- 匹配 Shared 欄位
         r'Conversion: (?P<Conversion>.*?)$',
         re.MULTILINE
     )
@@ -205,7 +206,6 @@ def execute_github_action(action, record_id_to_target, new_data=None):
         st.error("❌ 無法讀取 GitHub 檔案或 SHA 缺失。")
         return False
 
-    # 從 Session State 獲取 DataFrame (此時應為最新數據)
     df = st.session_state.df_records
     
     if df.empty or record_id_to_target not in df['Record_ID'].values:
@@ -213,8 +213,6 @@ def execute_github_action(action, record_id_to_target, new_data=None):
         return False
 
     target_row = df[df['Record_ID'] == record_id_to_target].iloc[0]
-    
-    # 標記要修改或刪除的原始行 (使用時間戳、用戶和金額來確保唯一性)
     target_line_start = f"[{target_row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}] User: {target_row['User']}"
     
     original_lines = full_content.strip().split('\n')
@@ -223,9 +221,9 @@ def execute_github_action(action, record_id_to_target, new_data=None):
     for line in original_lines:
         if line.startswith(target_line_start):
             if action == 'delete':
-                continue # 跳過這行，實現刪除
+                continue # 刪除
             elif action == 'update' and new_data:
-                # 重新創建新的記錄行 (注意：這裡使用當前的時間戳，而不是原來的，以避免未來衝突)
+                # 重新創建新的記錄行 (注意：使用當前時間戳)
                 new_line = (
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"User: {new_data['user_name']}, "
@@ -233,6 +231,7 @@ def execute_github_action(action, record_id_to_target, new_data=None):
                     f"Total: {new_data['total_amount']:.2f} {new_data['currency']}, "
                     f"Date: {new_data['transaction_date']}, "
                     f"Remarks: {new_data['remarks']}, "
+                    f"Shared: {new_data.get('is_shared', 'No')}, " # <-- 更新 Shared
                     f"Conversion: {new_data.get('conversion_notes', 'Manually Edited')}\n"
                 )
                 new_content_lines.append(new_line.strip())
@@ -288,7 +287,9 @@ def display_edit_form(record):
     try:
         current_date = datetime.strptime(record['Date'], '%Y-%m-%d').date()
     except:
-        current_date = date.today() # 處理日期格式錯誤
+        current_date = date.today()
+        
+    current_shared_status = record['Shared'].upper() == 'YES' # <-- 獲取當前共享狀態
 
     with st.form(key=f"edit_form_{record['Record_ID']}"):
         edited_shop = st.text_input("商家名稱", value=record['Shop'])
@@ -297,20 +298,22 @@ def display_edit_form(record):
         edited_date = st.date_input("交易日期", value=current_date)
         edited_remarks = st.text_input("備註", value=record['Remarks'])
         
+        edited_is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=current_shared_status) # <-- 編輯共享狀態
+        
         st.markdown("---")
 
         col_save, col_cancel = st.columns(2)
         
         if col_save.form_submit_button("✅ 保存更改"):
             
-            # 1. 執行轉換（如果需要）
             converted_amount, final_currency, _ = convert_currency(edited_amount, edited_currency)
             conversion_notes = f"Manually edited and converted from {edited_amount} {edited_currency} to {converted_amount:.2f} {final_currency}"
 
-            # 2. 準備新數據
+            # 準備新數據
             updated_data = {
                 "user_name": record['User'], 
                 "remarks": edited_remarks,
+                "is_shared": "Yes" if edited_is_shared else "No", # <-- 存儲更新後的共享狀態
                 "shop_name": edited_shop,
                 "total_amount": converted_amount,
                 "currency": final_currency,
@@ -318,7 +321,6 @@ def display_edit_form(record):
                 "conversion_notes": conversion_notes
             }
             
-            # 3. 執行更新
             if execute_github_action('update', record['Record_ID'], updated_data):
                 st.session_state.edit_id = None
                 st.rerun()
@@ -343,8 +345,10 @@ def render_submission_page():
 
     with st.form("expense_form"):
         st.subheader("基本信息")
-        user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Olivia'])
+        user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Oliver'])
         remarks = st.text_input("備註 (可選)", key="remarks_input")
+        
+        is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=False) # <-- 共享複選框
 
         st.markdown("---")
 
@@ -364,18 +368,22 @@ def render_submission_page():
             manual_shop = st.text_input("商家名稱 (Shop Name)")
             manual_amount = st.number_input("總金額 (Total Amount)", min_value=0.01, format="%.2f")
             
+            # --- 設置 HKD 為預設貨幣 ---
             manual_currency = st.selectbox(
                 "貨幣 (Currency)", 
-                options=["JPY", "HKD"], 
-                index=0, 
+                options=["HKD", "JPY"], 
+                index=0, # HKD 是第一個選項 (索引 0)
                 key="manual_currency_select"
             )
+            # --------------------------
             
             manual_date = st.date_input("交易日期 (Date)", value="today")
 
         submitted = st.form_submit_button("執行並提交記錄")
 
         if submitted:
+            # ... (OCR 和手動輸入數據獲取邏輯保持不變) ...
+            
             if submission_mode == "📸 圖片 OCR 分析":
                 if uploaded_file is None:
                     st.warning("請上傳收據圖片才能進行分析。")
@@ -396,7 +404,7 @@ def render_submission_page():
                     return
             
             if ocr_data:
-                
+                # ... (匯率轉換邏輯保持不變) ...
                 original_currency = ocr_data.get("currency", "N/A").upper()
                 original_amount = ocr_data.get("total_amount", 0.0)
                 
@@ -405,12 +413,8 @@ def render_submission_page():
                 
                 if original_currency in TARGET_CURRENCIES:
                     converted_amount, base_currency, rate = convert_currency(original_amount, original_currency)
-                    
                     if rate > 0.0:
-                        conversion_info = (
-                            f"Original: {original_amount} {original_currency}. "
-                            f"Converted to {converted_amount:.2f} {base_currency} (Rate: 1:{rate:.4f})"
-                        )
+                        conversion_info = (f"Original: {original_amount} {original_currency}. Converted to {converted_amount:.2f} {base_currency} (Rate: 1:{rate:.4f})")
                         ocr_data['total_amount'] = converted_amount
                         ocr_data['currency'] = base_currency
                     else:
@@ -419,9 +423,11 @@ def render_submission_page():
 
                 st.info(conversion_info)
                 
+                # 組合最終記錄數據
                 final_record = {
                     "user_name": user_name,
                     "remarks": remarks,
+                    "is_shared": "Yes" if is_shared else "No", # <-- 存儲共享狀態
                     "shop_name": ocr_data.get("shop_name", "N/A"),
                     "total_amount": ocr_data.get("total_amount", 0.0),
                     "currency": ocr_data.get("currency", original_currency),
@@ -439,13 +445,13 @@ def render_submission_page():
                      st.error("分析失敗，請檢查圖片或嘗試手動輸入。")
 
 
-# --- 9. 頁面渲染函數 B：查看記錄 (包含按鈕) ---
+# --- 9. 頁面渲染函數 B：查看記錄 ---
 
 def render_view_records_page():
     """渲染查看記錄頁面，包含編輯和刪除按鈕"""
     st.title("📚 歷史費用記錄")
     
-    # 重新加載數據，使用 cache_buster 確保在提交/編輯/刪除後刷新
+    # 重新加載數據
     if st.session_state.df_records.empty:
         with st.spinner("從 GitHub 下載並解析數據中..."):
             st.session_state.df_records = read_and_parse_records_to_df(datetime.now()) 
@@ -463,15 +469,16 @@ def render_view_records_page():
     for index, row in df.iterrows():
         record_id = row['Record_ID']
         
-        # 佈局：數據 | 編輯按鈕 | 刪除按鈕
         col_data, col_edit, col_delete = st.columns([10, 1, 1])
 
-        # 顯示數據摘要
+        # 顯示數據摘要 (包含 Shared 狀態)
+        shared_icon = "👥" if row['Shared'].upper() == 'YES' else "👤"
         record_summary = (
             f"**日期:** {row['Date']} | "
             f"**商家:** {row['Shop']} | "
             f"**金額:** {row['Amount Recorded']} | "
             f"**用戶:** {row['User']} | "
+            f"{shared_icon} **共享:** {row['Shared']} | " # <-- 顯示共享狀態
             f"**備註:** {row['Remarks']}"
         )
         col_data.markdown(record_summary)
@@ -500,7 +507,6 @@ def render_view_records_page():
 
 # --- 10. 應用程式主運行流程 (切換頁面) ---
 
-# 側邊欄導航 (模擬多頁面)
 st.sidebar.title("導航")
 page = st.sidebar.radio(
     "選擇功能頁面：",
@@ -508,7 +514,6 @@ page = st.sidebar.radio(
     key="page_selection"
 )
 
-# 根據選擇渲染對應的頁面
 if page == "提交費用 (OCR/手動)":
     render_submission_page()
 elif page == "查看記錄":
