@@ -3,4 +3,5 @@ google-genai
 Pillow
 pygithub
 python-dotenv
-pandas  # 新增：用於在查看頁面處理數據
+pandas
+forex-python  # <--- 新增這一行
