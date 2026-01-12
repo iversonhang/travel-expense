@@ -29,9 +29,9 @@ REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 # 貨幣轉換設定
-BASE_CURRENCY = "HKD"
-TARGET_CURRENCIES = ["HKD", "JPY"]
-AVAILABLE_CURRENCIES = ["HKD", "JPY"] # 用於編輯表單
+BASE_CURRENCY = "HKD" # <--- 基礎儲存貨幣設定為 HKD
+TARGET_CURRENCIES = ["JPY"] # 只有 JPY 需要轉換為 HKD
+AVAILABLE_CURRENCIES = ["HKD", "JPY"] # 用於手動輸入和編輯表單
 
 # --- Session State 初始化 (用於編輯/刪除/緩存) ---
 if 'edit_id' not in st.session_state:
@@ -63,7 +63,7 @@ RECEIPT_SCHEMA = types.Schema(
     properties={
         "shop_name": types.Schema(type=types.Type.STRING, description="The official name of the shop or vendor."),
         "total_amount": types.Schema(type=types.Type.NUMBER, description="The final total amount paid, including tax."),
-        "currency": types.Schema(type=types.Type.STRING, description="The currency code (e.g., TWD, JPY)."),
+        "currency": types.Schema(type=types.Type.STRING, description="The currency code (e.g., JPY, HKD)."),
         "transaction_date": types.Schema(type=types.Type.STRING, description="The date of the transaction in YYYY-MM-DD format."),
     },
     required=["shop_name", "total_amount", "currency", "transaction_date"]
@@ -75,13 +75,16 @@ RECEIPT_SCHEMA = types.Schema(
 def convert_currency(amount, from_currency):
     """將金額轉換為基礎貨幣 (HKD)"""
     if from_currency == BASE_CURRENCY:
-        return amount, BASE_CURRENCY, 1.0
+        return amount, BASE_CURRENCY, 1.0 # 如果是 HKD，不轉換
+
     try:
         c = CurrencyRates(force_decimal=True)
+        # 獲取 JPY 到 HKD 的即時匯率
         rate = c.get_rate(from_currency, BASE_CURRENCY)
         converted_amount = amount * rate
         return float(converted_amount), BASE_CURRENCY, float(rate)
     except Exception:
+        # 轉換失敗，返回原始數據，但標記轉換失敗
         return amount, from_currency, 0.0 
 
 
@@ -123,11 +126,11 @@ def read_full_content():
 
 
 def write_to_github_file(record_data):
-    """將單條記錄追加寫入 TXT 檔案 (包含 Shared 狀態)"""
+    """將單條記錄追加寫入 TXT 檔案 (包含 Shared 和 OriginalCurrency)"""
     if not GITHUB_TOKEN: return False
 
     try:
-        # 將記錄轉換為單行文本格式 (新增 Shared)
+        # 將記錄轉換為單行文本格式 (新增 Shared 和 OriginalCurrency)
         record_text = (
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"User: {record_data['user_name']}, "
@@ -135,7 +138,8 @@ def write_to_github_file(record_data):
             f"Total: {record_data['total_amount']:.2f} {record_data['currency']}, "
             f"Date: {record_data['transaction_date']}, "
             f"Remarks: {record_data['remarks']}, "
-            f"Shared: {record_data.get('is_shared', 'No')}, " # <-- 新增此欄位
+            f"Shared: {record_data.get('is_shared', 'No')}, " 
+            f"OriginalCurrency: {record_data.get('original_currency', BASE_CURRENCY)}, " # <--- 新增
             f"Conversion: {record_data.get('conversion_notes', 'N/A')}\n"
         )
         
@@ -167,7 +171,7 @@ def read_and_parse_records_to_df(cache_buster):
     if not content: return pd.DataFrame()
 
     records = []
-    # 匹配 TXT 檔案中包含 Shared 和 Conversion 信息的結構
+    # 匹配 TXT 檔案中包含 Shared, OriginalCurrency 和 Conversion 信息的結構
     pattern = re.compile(
         r'^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] '
         r'User: (?P<User>.*?), '
@@ -175,7 +179,8 @@ def read_and_parse_records_to_df(cache_buster):
         r'Total: (?P<Total>.*?)\s*(?P<Currency>[A-Z]{3}?), '
         r'Date: (?P<Date>\d{4}-\d{2}-\d{2}), '
         r'Remarks: (?P<Remarks>.*?), '
-        r'Shared: (?P<Shared>.*?),\s*' # <-- 匹配 Shared 欄位
+        r'Shared: (?P<Shared>.*?),\s*' 
+        r'OriginalCurrency: (?P<OriginalCurrency>[A-Z]{3}?), \s*' # <--- 匹配 OriginalCurrency
         r'Conversion: (?P<Conversion>.*?)$',
         re.MULTILINE
     )
@@ -184,6 +189,7 @@ def read_and_parse_records_to_df(cache_buster):
         match = pattern.match(line)
         if match:
             data = match.groupdict()
+            # Total 和 Currency 是儲存的 HKD 數據
             data['Amount Recorded'] = f"{data.pop('Total').strip()} {data.pop('Currency').strip()}"
             records.append(data)
     
@@ -228,10 +234,11 @@ def execute_github_action(action, record_id_to_target, new_data=None):
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"User: {new_data['user_name']}, "
                     f"Shop: {new_data['shop_name']}, "
-                    f"Total: {new_data['total_amount']:.2f} {new_data['currency']}, "
+                    f"Total: {new_data['total_amount']:.2f} {new_data['currency']}, " # HKD 金額
                     f"Date: {new_data['transaction_date']}, "
                     f"Remarks: {new_data['remarks']}, "
-                    f"Shared: {new_data.get('is_shared', 'No')}, " # <-- 更新 Shared
+                    f"Shared: {new_data.get('is_shared', 'No')}, " 
+                    f"OriginalCurrency: {new_data.get('original_currency', BASE_CURRENCY)}, " # <--- 新增
                     f"Conversion: {new_data.get('conversion_notes', 'Manually Edited')}\n"
                 )
                 new_content_lines.append(new_line.strip())
@@ -280,25 +287,42 @@ def display_edit_form(record):
     """顯示編輯選定記錄的表單"""
     st.subheader(f"✏️ 編輯記錄 (ID: {record['Record_ID']})")
     
+    # 記錄的金額和貨幣始終是 HKD (BASE_CURRENCY)
     amount_parts = record['Amount Recorded'].split()
     current_amount = float(amount_parts[0])
-    current_currency = amount_parts[-1]
+    current_currency = amount_parts[-1] # 應該是 HKD
     
     try:
         current_date = datetime.strptime(record['Date'], '%Y-%m-%d').date()
     except:
         current_date = date.today()
         
-    current_shared_status = record['Shared'].upper() == 'YES' # <-- 獲取當前共享狀態
+    current_shared_status = record['Shared'].upper() == 'YES'
+    
+    # 獲取原始貨幣，用於在編輯表單中顯示預設選項
+    current_original_currency = record.get('OriginalCurrency', BASE_CURRENCY)
+
 
     with st.form(key=f"edit_form_{record['Record_ID']}"):
         edited_shop = st.text_input("商家名稱", value=record['Shop'])
-        edited_amount = st.number_input("總金額", value=current_amount, format="%.2f")
-        edited_currency = st.selectbox("貨幣", options=AVAILABLE_CURRENCIES, index=AVAILABLE_CURRENCIES.index(current_currency))
+        
+        # 允許用戶輸入原始幣種的金額，以便進行轉換
+        edited_original_amount = st.number_input(
+            f"原始/HKD 金額 ({current_original_currency})", 
+            value=current_amount if current_original_currency == BASE_CURRENCY else current_amount, 
+            format="%.2f",
+            help="請輸入您希望記錄的原始金額。如果選擇 JPY，將自動轉換為 HKD。"
+        )
+
+        edited_currency = st.selectbox(
+            "原始/轉換貨幣", 
+            options=AVAILABLE_CURRENCIES, 
+            index=AVAILABLE_CURRENCIES.index(current_original_currency)
+        )
+        
         edited_date = st.date_input("交易日期", value=current_date)
         edited_remarks = st.text_input("備註", value=record['Remarks'])
-        
-        edited_is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=current_shared_status) # <-- 編輯共享狀態
+        edited_is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=current_shared_status) 
         
         st.markdown("---")
 
@@ -306,17 +330,19 @@ def display_edit_form(record):
         
         if col_save.form_submit_button("✅ 保存更改"):
             
-            converted_amount, final_currency, _ = convert_currency(edited_amount, edited_currency)
-            conversion_notes = f"Manually edited and converted from {edited_amount} {edited_currency} to {converted_amount:.2f} {final_currency}"
+            # 1. 執行轉換 (edited_currency -> HKD)
+            converted_amount, final_currency, _ = convert_currency(edited_original_amount, edited_currency)
+            conversion_notes = f"Manually edited. Converted from {edited_original_amount} {edited_currency} to {converted_amount:.2f} {final_currency}"
 
-            # 準備新數據
+            # 2. 準備新數據
             updated_data = {
                 "user_name": record['User'], 
                 "remarks": edited_remarks,
-                "is_shared": "Yes" if edited_is_shared else "No", # <-- 存儲更新後的共享狀態
+                "is_shared": "Yes" if edited_is_shared else "No", 
+                "original_currency": edited_currency,         # <-- 記錄用戶選擇的貨幣
                 "shop_name": edited_shop,
-                "total_amount": converted_amount,
-                "currency": final_currency,
+                "total_amount": converted_amount,             # <-- 儲存 HKD 金額
+                "currency": final_currency,                   # <-- 儲存 HKD 幣種
                 "transaction_date": edited_date.strftime("%Y-%m-%d"),
                 "conversion_notes": conversion_notes
             }
@@ -348,7 +374,7 @@ def render_submission_page():
         user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Olivia'])
         remarks = st.text_input("備註 (可選)", key="remarks_input")
         
-        is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=False) # <-- 共享複選框
+        is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=False) 
 
         st.markdown("---")
 
@@ -357,7 +383,6 @@ def render_submission_page():
         
         if submission_mode == "📸 圖片 OCR 分析":
             st.subheader("圖片上傳與 AI 分析")
-            # 兼容大小寫，解決部分手機上傳問題
             uploaded_file = st.file_uploader(
                 "上傳收據圖片 (JPEG/PNG)", 
                 type=['jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG']
@@ -368,22 +393,20 @@ def render_submission_page():
             manual_shop = st.text_input("商家名稱 (Shop Name)")
             manual_amount = st.number_input("總金額 (Total Amount)", min_value=0.01, format="%.2f")
             
-            # --- 設置 HKD 為預設貨幣 ---
+            # 設置 HKD 為預設貨幣，且僅允許 HKD/JPY
             manual_currency = st.selectbox(
                 "貨幣 (Currency)", 
                 options=["HKD", "JPY"], 
-                index=0, # HKD 是第一個選項 (索引 0)
+                index=0, # HKD
                 key="manual_currency_select"
             )
-            # --------------------------
             
             manual_date = st.date_input("交易日期 (Date)", value="today")
 
         submitted = st.form_submit_button("執行並提交記錄")
 
         if submitted:
-            # ... (OCR 和手動輸入數據獲取邏輯保持不變) ...
-            
+            # 1. 獲取 OCR/手動 輸入數據
             if submission_mode == "📸 圖片 OCR 分析":
                 if uploaded_file is None:
                     st.warning("請上傳收據圖片才能進行分析。")
@@ -404,22 +427,31 @@ def render_submission_page():
                     return
             
             if ocr_data:
-                # ... (匯率轉換邏輯保持不變) ...
+                
                 original_currency = ocr_data.get("currency", "N/A").upper()
                 original_amount = ocr_data.get("total_amount", 0.0)
                 
                 converted_amount = original_amount
-                conversion_info = f"Original: {original_amount} {original_currency}"
+                final_currency = original_currency
                 
-                if original_currency in TARGET_CURRENCIES:
-                    converted_amount, base_currency, rate = convert_currency(original_amount, original_currency)
+                if original_currency in TARGET_CURRENCIES: # 如果是 JPY
+                    # 執行 JPY -> HKD 轉換
+                    converted_amount, final_currency, rate = convert_currency(original_amount, original_currency)
+                    
                     if rate > 0.0:
-                        conversion_info = (f"Original: {original_amount} {original_currency}. Converted to {converted_amount:.2f} {base_currency} (Rate: 1:{rate:.4f})")
-                        ocr_data['total_amount'] = converted_amount
-                        ocr_data['currency'] = base_currency
+                        conversion_info = (
+                            f"Original: {original_amount} {original_currency}. "
+                            f"Converted to {converted_amount:.2f} {BASE_CURRENCY} (Rate: 1:{rate:.4f})"
+                        )
+                        final_currency = BASE_CURRENCY # 最終幣種為 HKD
                     else:
+                         # 轉換失敗，使用原始 JPY/錯誤幣種，但應記錄
                          st.warning(f"⚠️ 匯率轉換失敗。將使用原始值記錄：{original_amount} {original_currency}。")
                          conversion_info = f"Original: {original_amount} {original_currency}. 轉換失敗，使用原始值記錄。"
+                else:
+                    # 假設 OCR 識別出 HKD 或其他非 JPY 幣種，我們仍將其視為 HKD 基礎金額
+                    final_currency = BASE_CURRENCY
+                    conversion_info = f"Original: {original_amount} {original_currency}. Stored as {BASE_CURRENCY}. No conversion needed."
 
                 st.info(conversion_info)
                 
@@ -427,10 +459,11 @@ def render_submission_page():
                 final_record = {
                     "user_name": user_name,
                     "remarks": remarks,
-                    "is_shared": "Yes" if is_shared else "No", # <-- 存儲共享狀態
+                    "is_shared": "Yes" if is_shared else "No", 
+                    "original_currency": original_currency,      # <-- 儲存原始幣種
                     "shop_name": ocr_data.get("shop_name", "N/A"),
-                    "total_amount": ocr_data.get("total_amount", 0.0),
-                    "currency": ocr_data.get("currency", original_currency),
+                    "total_amount": converted_amount,            # <-- 儲存轉換後 (HKD) 金額
+                    "currency": final_currency,                  # <-- 儲存 HKD
                     "transaction_date": ocr_data.get("transaction_date", datetime.now().strftime("%Y-%m-%d")),
                     "conversion_notes": conversion_info
                 }
@@ -451,7 +484,6 @@ def render_view_records_page():
     """渲染查看記錄頁面，包含編輯和刪除按鈕"""
     st.title("📚 歷史費用記錄")
     
-    # 重新加載數據
     if st.session_state.df_records.empty:
         with st.spinner("從 GitHub 下載並解析數據中..."):
             st.session_state.df_records = read_and_parse_records_to_df(datetime.now()) 
@@ -471,14 +503,18 @@ def render_view_records_page():
         
         col_data, col_edit, col_delete = st.columns([10, 1, 1])
 
-        # 顯示數據摘要 (包含 Shared 狀態)
+        # 顯示數據摘要 (包含 Shared 和 OriginalCurrency)
         shared_icon = "👥" if row['Shared'].upper() == 'YES' else "👤"
+        
+        # 顯示最終金額 (HKD) 和原始幣種
+        original_curr_display = f" (原: {row['OriginalCurrency']})" if row['OriginalCurrency'] != BASE_CURRENCY else ""
+
         record_summary = (
             f"**日期:** {row['Date']} | "
             f"**商家:** {row['Shop']} | "
-            f"**金額:** {row['Amount Recorded']} | "
+            f"**金額:** {row['Amount Recorded']}{original_curr_display} | " # <-- 顯示原始貨幣
             f"**用戶:** {row['User']} | "
-            f"{shared_icon} **共享:** {row['Shared']} | " # <-- 顯示共享狀態
+            f"{shared_icon} **共享:** {row['Shared']} | " 
             f"**備註:** {row['Remarks']}"
         )
         col_data.markdown(record_summary)
