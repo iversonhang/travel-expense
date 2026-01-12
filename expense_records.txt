@@ -1,1 +1,2 @@
 
+[2026-01-12 06:47:37] User: Mary, Shop: I.T.C. Recycle, Total: 100.00 HKD, Date: 2026-01-12, Remarks: , Conversion: Original: 100.0 HKD. 轉換失敗，使用原始值記錄。
