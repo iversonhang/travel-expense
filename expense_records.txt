@@ -4,3 +4,4 @@
 [2026-01-12 09:29:42] User: TSH, Shop: Rakuten Travel, Total: 0.00 HKD, Date: 2026-01-10, Remarks: shared, Shared: Yes, OriginalAmount: 0.00, OriginalCurrency: , Conversion: Original: 0 . Stored as HKD. No conversion needed.
 [2026-01-12 09:31:16] User: TSH, Shop: 18-19 Hotel, Total: 5896.35 HKD, Date: 2026-01-12, Remarks: Shared, Shared: No, OriginalAmount: 5896.35, OriginalCurrency: HKD, Conversion: Original: 5896.35 HKD. Stored as HKD. No conversion needed.
 [2026-01-12 14:22:08] User: TSH, Shop: Keeta, Total: 65.00 HKD, Date: , Remarks: , Shared: No, OriginalAmount: 65.00, OriginalCurrency: HKD, Conversion: Original: 65.0 HKD. Stored as HKD. No conversion needed.
+[2026-01-12 14:51:04] User: Olivia, Shop: SF EXPRESS, Total: 20.00 HKD, Date: 2026-01-10, Remarks: , Shared: Yes, OriginalAmount: 20.00, OriginalCurrency: HKD, Conversion: Original: 20.0 HKD. Stored as HKD. No conversion needed.
