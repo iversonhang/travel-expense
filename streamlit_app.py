@@ -13,6 +13,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 from github import Github
+import fitz # <--- 新增: 用於處理 PDF
 
 # --- 0. 環境變數設定與初始化 ---
 load_dotenv()
@@ -31,11 +32,11 @@ REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 # --- 用戶和貨幣配置 ---
-ALLOWED_USERS = ["TWH", "TSH", "Olivia"] # <--- 限定的用戶列表
-BASE_CURRENCY = "HKD" # 基礎儲存貨幣設定為 HKD
-TARGET_CURRENCIES = ["JPY"] # 只有 JPY 需要轉換為 HKD
-AVAILABLE_CURRENCIES = ["HKD", "JPY"] # 用於手動輸入和編輯表單
-API_BASE_URL = "https://v6.exchangerate-api.com/v6" # ExchangeRate API URL
+ALLOWED_USERS = ["TWH", "TSH", "Olivia"] 
+BASE_CURRENCY = "HKD" 
+TARGET_CURRENCIES = ["JPY"] 
+AVAILABLE_CURRENCIES = ["HKD", "JPY"] 
+API_BASE_URL = "https://v6.exchangerate-api.com/v6" 
 
 # --- Session State 初始化 (用於編輯/刪除/緩存) ---
 if 'edit_id' not in st.session_state:
@@ -74,7 +75,7 @@ RECEIPT_SCHEMA = types.Schema(
 )
 
 
-# --- 2. 匯率轉換函數 (使用 ExchangeRate-API) ---
+# --- 2. 匯率轉換函數 (使用 ExchangeRate-API) (保持不變) ---
 @st.cache_data(ttl=3600)
 def convert_currency(amount, from_currency):
     """使用 ExchangeRate-API 將金額轉換為基礎貨幣 (HKD)"""
@@ -107,20 +108,55 @@ def convert_currency(amount, from_currency):
         st.error(f"❌ 轉換過程發生異常: {e}")
         return amount, from_currency, 0.0 
 
+# --- 2A. 新增 PDF 轉換函數 ---
+def pdf_to_images(uploaded_pdf_file):
+    """
+    將上傳的 PDF 檔案的第一頁轉換為 PIL 圖片對象。
+    返回一個包含 (prompt, image) 對的列表，以便傳遞給 Gemini。
+    """
+    try:
+        # 使用 fitz (PyMuPDF) 打開檔案
+        pdf_bytes = uploaded_pdf_file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        if doc.page_count == 0:
+            st.error("❌ PDF 檔案中沒有頁面。")
+            return None
 
-# --- 3. 核心 Gemini 處理函數 (保持不變) ---
-def analyze_receipt(uploaded_file):
+        # 僅處理第一頁
+        page = doc.load_page(0)
+        
+        # 設置渲染參數：dpi=300 可以獲得高解析度圖片
+        zoom = 300 / 72  # 300 DPI
+        matrix = fitz.Matrix(zoom, zoom)
+        
+        # 將頁面渲染為 pixmap
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        
+        # 將 pixmap 轉換為 PIL Image
+        img_data = pix.tobytes("ppm")
+        image = Image.frombytes("RGB", [pix.width, pix.height], img_data)
+        
+        doc.close()
+        
+        return image
+        
+    except Exception as e:
+        st.error(f"❌ 處理 PDF 檔案時發生錯誤: {e}")
+        return None
+
+
+# --- 3. 核心 Gemini 處理函數 (更新: 統一處理圖片/PDF 輸出) ---
+def analyze_receipt(image_to_analyze):
     """呼叫 Gemini API 進行收據 OCR 分析"""
     if not gemini_client: return None
         
-    image = Image.open(uploaded_file)
-    
     prompt = ("Analyze the provided receipt image. Extract the vendor name, total amount, currency, and date "
             "in YYYY-MM-DD format. Strictly output the data in the required JSON format.")
     
     try:
         response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash', contents=[prompt, image],
+            model='gemini-2.5-flash', contents=[prompt, image_to_analyze],
             config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=RECEIPT_SCHEMA)
         )
         return json.loads(response.text)
@@ -129,8 +165,8 @@ def analyze_receipt(uploaded_file):
         return None
 
 
-# --- 4. GitHub 讀取/寫入/刪除 輔助函數 ---
-
+# --- 4. GitHub 讀取/寫入/刪除 輔助函數 (保持不變) ---
+# ... (此部分程式碼保持不變) ...
 def read_full_content():
     """從 GitHub 讀取並返回 expense_records.txt 的原始字串和 SHA"""
     if not GITHUB_TOKEN:
@@ -150,7 +186,6 @@ def write_to_github_file(record_data):
     if not GITHUB_TOKEN: return False
 
     try:
-        # 將記錄轉換為單行文本格式 (包含 OriginalAmount)
         record_text = (
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"User: {record_data['user_name']}, "
@@ -184,7 +219,8 @@ def write_to_github_file(record_data):
         st.error(f"❌ 寫入 GitHub 失敗: {e}")
         return False
 
-# --- 5. 數據讀取和解析函數 ---
+# --- 5. 數據讀取和解析函數 (保持不變) ---
+# ... (此部分程式碼保持不變) ...
 @st.cache_data(show_spinner=False)
 def read_and_parse_records_to_df(cache_buster):
     """從 GitHub 讀取 TXT 檔案並解析為 DataFrame"""
@@ -193,7 +229,6 @@ def read_and_parse_records_to_df(cache_buster):
 
     records = []
     
-    # 匹配 TXT 檔案中包含 OriginalAmount 的結構
     pattern = re.compile(
         r'^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] '
         r'User: (?P<User>.*?), '
@@ -213,7 +248,6 @@ def read_and_parse_records_to_df(cache_buster):
         if match:
             data = match.groupdict()
             
-            # 從 Amount Recorded 中分離出 Total (HKD) 和 Currency (HKD)
             total_amount_hkd = float(data['Total'].strip())
             total_currency_hkd = data['Currency'].strip()
             
@@ -222,7 +256,7 @@ def read_and_parse_records_to_df(cache_buster):
                 'User': data['User'].strip(),
                 'Shop': data['Shop'].strip(),
                 'Amount Recorded': f"{total_amount_hkd:.2f} {total_currency_hkd}",
-                'Total_HKD_Value': total_amount_hkd, # <--- 新增欄位：用於計算總計
+                'Total_HKD_Value': total_amount_hkd, 
                 'Date': data['Date'],
                 'Remarks': data['Remarks'].strip(),
                 'Shared': data['Shared'].strip(),
@@ -234,7 +268,6 @@ def read_and_parse_records_to_df(cache_buster):
     df = pd.DataFrame(records)
     if df.empty: return df
     
-    # 確保用戶名只有在允許列表內 (將不在列表內的用戶歸類為 'Other')
     df['User'] = df['User'].apply(lambda x: x if x in ALLOWED_USERS else 'Other') 
     
     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -244,7 +277,7 @@ def read_and_parse_records_to_df(cache_buster):
 
 
 # --- 6. 刪除/更新 執行函數 (保持不變) ---
-
+# ... (此部分程式碼保持不變) ...
 def execute_github_action(action, record_id_to_target, new_data=None):
     """執行刪除或更新操作，並寫回整個檔案"""
     full_content, sha = read_full_content()
@@ -306,7 +339,7 @@ def execute_github_action(action, record_id_to_target, new_data=None):
 
 
 # --- 7. 編輯和刪除 UI 輔助函數 (保持不變) ---
-
+# ... (此部分程式碼保持不變) ...
 def display_delete_confirmation(record):
     """顯示刪除確認框"""
     st.error(f"⚠️ 確認刪除記錄 (ID: {record['Record_ID']})：{record['Shop']} - {record['Amount Recorded']}？")
@@ -342,11 +375,10 @@ def display_edit_form(record):
     
     current_original_amount = float(record.get('OriginalAmount', current_amount_hkd)) 
 
-    # 確保編輯時的用戶名選項是限定列表
-    current_user_index = ALLOWED_USERS.index(record['User']) if record['User'] in ALLOWED_USERS else 0 # 假設 TWH 是第一個
+    current_user_index = ALLOWED_USERS.index(record['User']) if record['User'] in ALLOWED_USERS else 0 
     
     with st.form(key=f"edit_form_{record['Record_ID']}"):
-        edited_user = st.selectbox("誰支付了？", options=ALLOWED_USERS, index=current_user_index) # <--- 更新用戶列表
+        edited_user = st.selectbox("誰支付了？", options=ALLOWED_USERS, index=current_user_index) 
         edited_shop = st.text_input("商家名稱", value=record['Shop'])
         
         edited_original_amount = st.number_input(
@@ -372,13 +404,11 @@ def display_edit_form(record):
         
         if col_save.form_submit_button("✅ 保存更改"):
             
-            # 1. 執行轉換 (edited_currency -> HKD)
             converted_amount, final_currency, _ = convert_currency(edited_original_amount, edited_currency)
             conversion_notes = f"Manually edited. Converted from {edited_original_amount} {edited_currency} to {converted_amount:.2f} {final_currency}"
 
-            # 2. 準備新數據
             updated_data = {
-                "user_name": edited_user, # <--- 使用編輯後的新用戶名
+                "user_name": edited_user, 
                 "remarks": edited_remarks,
                 "is_shared": "Yes" if edited_is_shared else "No", 
                 "original_currency": edited_currency,         
@@ -399,7 +429,7 @@ def display_edit_form(record):
             st.rerun()
 
 
-# --- 8. 頁面渲染函數 A：提交費用 ---
+# --- 8. 頁面渲染函數 A：提交費用 (更新: 允許上傳 PDF) ---
 
 def render_submission_page():
     """渲染費用提交頁面 (OCR/手動)"""
@@ -414,7 +444,6 @@ def render_submission_page():
 
     with st.form("expense_form"):
         st.subheader("基本信息")
-        # <--- 更新用戶選項
         user_name = st.selectbox("誰支付了？", options=ALLOWED_USERS) 
         remarks = st.text_input("備註 (可選)", key="remarks_input")
         
@@ -426,10 +455,10 @@ def render_submission_page():
         uploaded_file = None
         
         if submission_mode == "📸 圖片 OCR 分析":
-            st.subheader("圖片上傳與 AI 分析")
+            st.subheader("圖片/PDF 上傳與 AI 分析")
             uploaded_file = st.file_uploader(
-                "上傳收據圖片 (JPEG/PNG)", 
-                type=['jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG']
+                "上傳收據圖片 (JPEG/PNG) 或 PDF 檔案", 
+                type=['jpg', 'jpeg', 'png', 'pdf'] # <--- 允許 PDF
             )
 
         elif submission_mode == "✍️ 手動輸入":
@@ -452,10 +481,26 @@ def render_submission_page():
             # 1. 獲取 OCR/手動 輸入數據
             if submission_mode == "📸 圖片 OCR 分析":
                 if uploaded_file is None:
-                    st.warning("請上傳收據圖片才能進行分析。")
+                    st.warning("請上傳收據圖片或 PDF 檔案才能進行分析。")
                     return
-                with st.spinner('AI 正在分析收據...'):
-                    ocr_data = analyze_receipt(uploaded_file)
+                
+                # --- 處理檔案類型 ---
+                image_to_analyze = None
+                if uploaded_file.type == "application/pdf":
+                    # 轉換 PDF 為圖片
+                    with st.spinner('正在轉換 PDF 為圖片...'):
+                        image_to_analyze = pdf_to_images(uploaded_file)
+                else:
+                    # 處理圖片檔案
+                    image_to_analyze = Image.open(uploaded_file)
+
+                if image_to_analyze:
+                    # 進行 OCR 分析
+                    with st.spinner('AI 正在分析收據...'):
+                        ocr_data = analyze_receipt(image_to_analyze)
+                else:
+                    st.error("無法從上傳的檔案中獲取圖像進行分析。")
+                    return
             
             elif submission_mode == "✍️ 手動輸入":
                 if manual_shop and manual_amount and manual_currency:
@@ -497,7 +542,6 @@ def render_submission_page():
 
                 st.info(conversion_info)
                 
-                # 組合最終記錄數據
                 final_record = {
                     "user_name": user_name,
                     "remarks": remarks,
@@ -518,45 +562,38 @@ def render_submission_page():
                     write_to_github_file(final_record)
             else:
                 if submission_mode == "📸 圖片 OCR 分析":
-                     st.error("分析失敗，請檢查圖片或嘗試手動輸入。")
+                     st.error("分析失敗，請檢查檔案或嘗試手動輸入。")
 
 
-# --- 9A. 費用總結計算和顯示函數 (新增) ---
-
+# --- 9A. 費用總結計算和顯示函數 (保持不變) ---
+# ... (此部分程式碼保持不變) ...
 def calculate_and_display_summary(df):
     """計算並顯示總支出和按用戶分類的支出"""
     st.markdown("---")
     st.subheader("📊 費用總結報告 (HKD)")
     
-    # 確保 Total_HKD_Value 存在且為數值類型
     if 'Total_HKD_Value' not in df.columns:
         st.warning("無法計算總結：缺少 HKD 金額數據。")
         return
 
-    # 總支出
     total_expense = df['Total_HKD_Value'].sum()
     
-    # 按用戶分組計算
     user_summary = df.groupby('User')['Total_HKD_Value'].sum().reset_index()
     
-    # 創建三列佈局
     col_total, col_user_1, col_user_2, col_user_3 = st.columns([1, 1, 1, 1])
 
-    # 1. 顯示總支出
     with col_total:
         st.metric(
             label=f"💰 **總支出 (所有用戶)**",
             value=f"{total_expense:,.2f} {BASE_CURRENCY}"
         )
     
-    # 2. 顯示每個用戶的支出
     columns = [col_user_1, col_user_2, col_user_3]
     
     for i, user in enumerate(ALLOWED_USERS):
         if i < len(columns):
             user_total = user_summary[user_summary['User'] == user]['Total_HKD_Value'].iloc[0] if user in user_summary['User'].values else 0.0
             
-            # 使用 Emoji 區分用戶
             if user == "TWH":
                 icon = "👨‍💻"
             elif user == "TSH":
@@ -574,15 +611,14 @@ def calculate_and_display_summary(df):
 
     st.markdown("---")
     
-# --- 9B. 頁面渲染函數 B：查看記錄 (更新: 呼叫總結函數) ---
-
+# --- 9B. 頁面渲染函數 B：查看記錄 (保持不變) ---
+# ... (此部分程式碼保持不變) ...
 def render_view_records_page():
     """渲染查看記錄頁面，包含編輯和刪除按鈕"""
     st.title("📚 歷史費用記錄")
     
     if st.session_state.df_records.empty:
         with st.spinner("從 GitHub 下載並解析數據中..."):
-            # 傳遞一個會變化的值 (時間) 確保在必要時重新加載
             st.session_state.df_records = read_and_parse_records_to_df(datetime.now()) 
 
     df = st.session_state.df_records
@@ -591,14 +627,11 @@ def render_view_records_page():
         st.warning("當前檔案中沒有可解析的費用記錄。")
         return
 
-    # --- 呼叫新的總結函數 ---
     calculate_and_display_summary(df) 
-    # -----------------------
 
     st.subheader(f"找到 {len(df)} 條記錄")
     st.markdown("---")
 
-    # 手動渲染每條記錄並添加按鈕
     for index, row in df.iterrows():
         record_id = row['Record_ID']
         
@@ -623,13 +656,11 @@ def render_view_records_page():
         )
         col_data.markdown(record_summary)
 
-        # 編輯按鈕
         if col_edit.button("✏️ 編輯", key=f'edit_{record_id}'):
             st.session_state.edit_id = record_id
             st.session_state.delete_confirm_id = None
             st.rerun()
 
-        # 刪除按鈕
         if col_delete.button("🗑️ 刪除", key=f'delete_{record_id}'):
             st.session_state.delete_confirm_id = record_id
             st.session_state.edit_id = None
@@ -637,7 +668,6 @@ def render_view_records_page():
 
         st.markdown("---")
         
-        # 處理交互式 UI
         if st.session_state.edit_id == record_id:
             display_edit_form(row)
             
