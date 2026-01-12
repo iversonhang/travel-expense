@@ -28,7 +28,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 # 設置您的 GitHub 儲存庫信息
 # !! 請務必替換成您自己的 GitHub 用戶名和儲存庫名稱 !!
-REPO_NAME = "YOUR_USERNAME/YOUR_REPO_NAME" 
+REPO_NAME = "iversonhang/travel-expense" 
 FILE_PATH = "expense_records.txt"
 
 @st.cache_resource
@@ -144,7 +144,7 @@ st.markdown("---")
 # 這裡使用 st.form 來確保在提交按鈕按下之前，程式碼不會執行後續的數據處理
 with st.form("expense_form"):
     st.subheader("輸入費用信息")
-    user_name = st.selectbox("誰支付了？", options=['Mary', 'John', 'Other'])
+    user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Olivia'])
     remarks = st.text_input("備註 (可選)", key="remarks_input")
     
     st.markdown("---")
