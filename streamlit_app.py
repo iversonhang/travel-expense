@@ -175,36 +175,80 @@ def read_and_parse_records():
 
 # --- 5. 頁面渲染函數 ---
 
+# streamlit_app.py (修改後的 render_submission_page 函數)
+
 def render_submission_page():
-    """渲染費用提交頁面 (主頁面)"""
-    st.title("💸 提交費用 (OCR)")
-    st.markdown("使用 Gemini AI 分析收據，並將數據記錄到 GitHub TXT 檔案。")
+    """渲染費用提交頁面 (主頁面)，新增手動輸入模式"""
+    st.title("💸 提交費用")
     st.markdown("---")
 
+    # --- 1. 模式選擇 ---
+    submission_mode = st.radio(
+        "選擇數據輸入方式：",
+        ("📸 圖片 OCR 分析", "✍️ 手動輸入"),
+        key="submission_mode"
+    )
+
+    # VVVVVV 單頁表單 VVVVVV
     with st.form("expense_form"):
-        st.subheader("輸入費用信息")
+        st.subheader("基本信息")
         user_name = st.selectbox("誰支付了？", options=['Mary', 'John', 'Other'])
         remarks = st.text_input("備註 (可選)", key="remarks_input")
-        
+
         st.markdown("---")
+
+        ocr_data = None  # 用於存儲 AI 分析或手動輸入的結果
+        uploaded_file = None
         
-        uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
-        
-        submitted = st.form_submit_button("執行分析並提交到 GitHub")
-        
-        if submitted and uploaded_file is not None:
-            # --- 流程開始 ---
-            with st.spinner('AI 正在分析收據...'):
-                ocr_data = analyze_receipt(uploaded_file)
-            
-            if ocr_data:
-                st.success("收據分析完成！")
+        # --- 2. 根據模式顯示不同的輸入字段 ---
+        if submission_mode == "📸 圖片 OCR 分析":
+            st.subheader("圖片上傳與 AI 分析")
+            uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
+
+        elif submission_mode == "✍️ 手動輸入":
+            st.subheader("手動輸入費用細節")
+            # 添加手動輸入欄位
+            manual_shop = st.text_input("商家名稱 (Shop Name)")
+            manual_amount = st.number_input("總金額 (Total Amount)", min_value=0.01, format="%.2f")
+            manual_currency = st.text_input("貨幣 (Currency)", value="TWD")
+            manual_date = st.date_input("交易日期 (Date)", value="today")
+
+        # --- 3. 提交按鈕 ---
+        submitted = st.form_submit_button("執行並提交記錄")
+
+        # --- 4. 提交後的處理邏輯 ---
+        if submitted:
+            if submission_mode == "📸 圖片 OCR 分析":
+                if uploaded_file is None:
+                    st.warning("請上傳收據圖片才能進行分析。")
+                    return # 終止處理
                 
+                with st.spinner('AI 正在分析收據...'):
+                    ocr_data = analyze_receipt(uploaded_file)
+            
+            elif submission_mode == "✍️ 手動輸入":
+                # 手動模式，直接構造 ocr_data 字典
+                if manual_shop and manual_amount and manual_currency:
+                    ocr_data = {
+                        "shop_name": manual_shop,
+                        "total_amount": float(manual_amount),
+                        "currency": manual_currency.upper(),
+                        "transaction_date": manual_date.strftime("%Y-%m-%d") # 格式化為 YYYY-MM-DD
+                    }
+                else:
+                    st.error("請填寫商家名稱、金額和貨幣。")
+                    return # 終止處理
+            
+            # --- 5. 統一的數據處理和寫入邏輯 ---
+            if ocr_data:
+                st.success("數據準備完成！")
+                
+                # 組合最終記錄數據
                 final_record = {
                     "user_name": user_name,
                     "remarks": remarks,
                     "shop_name": ocr_data.get("shop_name", "N/A"),
-                    "total_amount": ocr_data.get("total_amount", 0),
+                    "total_amount": ocr_data.get("total_amount", 0.0),
                     "currency": ocr_data.get("currency", "N/A"),
                     "transaction_date": ocr_data.get("transaction_date", datetime.now().strftime("%Y-%m-%d")) 
                 }
@@ -212,13 +256,16 @@ def render_submission_page():
                 st.subheader("📝 提取和確認記錄:")
                 st.json(final_record)
                 
+                # 寫入 GitHub TXT 檔案
                 with st.spinner('正在寫入 GitHub 儲存庫...'):
                     write_to_github_file(final_record)
             else:
-                st.error("分析失敗，請檢查圖片或 Gemini API 狀態。")
-        
-        elif submitted and uploaded_file is None:
-            st.warning("請上傳收據圖片才能進行分析。")
+                # 僅在 OCR 模式下，如果 ocr_data 為 None，才會執行這裏
+                if submission_mode == "📸 圖片 OCR 分析":
+                     st.error("分析失敗，請檢查圖片或嘗試手動輸入。")
+
+# --- 側邊欄和主運行流程 (保持不變) ---
+# ...
 
 
 def render_view_records_page():
