@@ -6,7 +6,7 @@ from datetime import datetime
 
 # --- 環境變數 ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-REPO_NAME = "YOUR_USERNAME/YOUR_REPO_NAME" # 例如: "myuser/TravelExpenseStreamlit"
+REPO_NAME = "iversonhang/travel-expense" # 例如: "myuser/TravelExpenseStreamlit"
 FILE_PATH = "expense_records.txt"
 
 def write_to_github_file(new_record_text):
