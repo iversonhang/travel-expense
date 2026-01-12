@@ -29,7 +29,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 # 設置您的 GitHub 儲存庫信息
 # !! 請務必替換成您自己的 GitHub 用戶名和儲存庫名稱 !!
-REPO_NAME = "YOUR_USERNAME/YOUR_REPO_NAME" 
+REPO_NAME = "iversonhang\travel-expense" 
 FILE_PATH = "expense_records.txt"
 
 @st.cache_resource
