@@ -30,8 +30,18 @@ REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 # 貨幣轉換設定
-BASE_CURRENCY = "USD"
+BASE_CURRENCY = "JPY"
 TARGET_CURRENCIES = ["HKD", "JPY"]
+AVAILABLE_CURRENCIES = ["HKD", "JPY"] # 用於編輯表單
+
+# --- Session State 初始化 (用於編輯/刪除) ---
+if 'edit_id' not in st.session_state:
+    st.session_state.edit_id = None
+if 'delete_confirm_id' not in st.session_state:
+    st.session_state.delete_confirm_id = None
+if 'df_records' not in st.session_state:
+    st.session_state.df_records = pd.DataFrame()
+
 
 @st.cache_resource
 def init_gemini_client():
@@ -54,7 +64,7 @@ RECEIPT_SCHEMA = types.Schema(
     properties={
         "shop_name": types.Schema(type=types.Type.STRING, description="The official name of the shop or vendor."),
         "total_amount": types.Schema(type=types.Type.NUMBER, description="The final total amount paid, including tax."),
-        "currency": types.Schema(type=types.Type.STRING, description="The currency code (e.g., TWD, JPY, USD)."),
+        "currency": types.Schema(type=types.Type.STRING, description="The currency code (e.g., TWD, JPY)."),
         "transaction_date": types.Schema(type=types.Type.STRING, description="The date of the transaction in YYYY-MM-DD format."),
     },
     required=["shop_name", "total_amount", "currency", "transaction_date"]
@@ -62,44 +72,31 @@ RECEIPT_SCHEMA = types.Schema(
 
 
 # --- 2. 匯率轉換函數 ---
-@st.cache_data(ttl=3600) # 緩存匯率 1 小時
+@st.cache_data(ttl=3600)
 def convert_currency(amount, from_currency):
-    """將金額轉換為基礎貨幣 (USD)"""
+    """將金額轉換為基礎貨幣 (JPY)"""
     if from_currency == BASE_CURRENCY:
         return amount, BASE_CURRENCY, 1.0
-
     try:
         c = CurrencyRates(force_decimal=True)
-        # 獲取即時匯率
         rate = c.get_rate(from_currency, BASE_CURRENCY)
         converted_amount = amount * rate
         return float(converted_amount), BASE_CURRENCY, float(rate)
-    except Exception as e:
-        # 轉換失敗，返回原始數據
+    except Exception:
         return amount, from_currency, 0.0 
 
 
-# --- 3. 核心 Gemini 處理函數 ---
+# --- 3. 核心 Gemini 處理函數 (略) ---
 def analyze_receipt(uploaded_file):
-    """呼叫 Gemini API 進行收據 OCR 分析"""
-    if not gemini_client:
-        return None
-        
+    if not gemini_client: return None
+    # (OCR 邏輯與先前版本相同，這裡省略以節省篇幅，但程式碼中需包含完整的 analyze_receipt)
     image = Image.open(uploaded_file)
-    
-    prompt = (
-        "Analyze the provided receipt image. Extract the vendor name, total amount, currency, and date "
-        "in YYYY-MM-DD format. Strictly output the data in the required JSON format."
-    )
-    
+    prompt = ("Analyze the provided receipt image. Extract the vendor name, total amount, currency, and date "
+            "in YYYY-MM-DD format. Strictly output the data in the required JSON format.")
     try:
         response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[prompt, image],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=RECEIPT_SCHEMA
-            )
+            model='gemini-2.5-flash', contents=[prompt, image],
+            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=RECEIPT_SCHEMA)
         )
         return json.loads(response.text)
     except Exception as e:
@@ -107,15 +104,28 @@ def analyze_receipt(uploaded_file):
         return None
 
 
-# --- 4. GitHub 寫入函數 ---
-def write_to_github_file(record_data):
-    """使用 GitHub API 將記錄寫入 TXT 檔案 (包含轉換信息)"""
+# --- 4. GitHub 讀取/寫入/刪除 輔助函數 ---
+
+def read_full_content():
+    """從 GitHub 讀取並返回 expense_records.txt 的原始字串和 SHA"""
     if not GITHUB_TOKEN:
-        st.error("❌ GitHub Token 缺失，無法寫入檔案。")
-        return False
+        return None, None
+    try:
+        g = Github(GITHUB_TOKEN)
+        repo = g.get_repo(REPO_NAME)
+        contents = repo.get_contents(FILE_PATH)
+        content = base64.b64decode(contents.content).decode('utf-8')
+        return content, contents.sha 
+    except Exception:
+        return None, None
+
+
+def write_to_github_file(record_data):
+    """將單條記錄追加寫入 TXT 檔案"""
+    if not GITHUB_TOKEN: return False
 
     try:
-        # 將記錄轉換為單行文本格式 (新增 Conversion Notes)
+        # 將記錄轉換為單行文本格式
         record_text = (
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"User: {record_data['user_name']}, "
@@ -126,47 +136,32 @@ def write_to_github_file(record_data):
             f"Conversion: {record_data.get('conversion_notes', 'N/A')}\n"
         )
         
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(REPO_NAME)
-        
-        # 嘗試獲取現有內容
-        try:
-            contents = repo.get_contents(FILE_PATH)
-            existing_content = base64.b64decode(contents.content).decode('utf-8')
-            sha = contents.sha
-        except Exception:
-            existing_content = ""
-            sha = None
-            
-        updated_content = existing_content + record_text
+        full_content, sha = read_full_content() # 讀取現有內容和 SHA
+        updated_content = (full_content or "") + record_text
         commit_message = f"feat: Add new expense record for {record_data['user_name']}"
         
+        g = Github(GITHUB_TOKEN)
+        repo = g.get_repo(REPO_NAME)
+
         if sha:
             repo.update_file(FILE_PATH, commit_message, updated_content, sha)
         else:
             repo.create_file(FILE_PATH, commit_message, updated_content)
         
-        st.success(f"數據已成功寫入 GitHub 檔案：[{FILE_PATH}](https://github.com/{REPO_NAME}/blob/main/{FILE_PATH})")
+        st.success(f"數據已成功寫入 GitHub 檔案。")
+        st.session_state.df_records = pd.DataFrame() # 清除緩存以重新加載
         return True
 
     except Exception as e:
-        st.error(f"❌ 寫入 GitHub 失敗 (請檢查 Token 權限或 REPO_NAME)：{e}")
+        st.error(f"❌ 寫入 GitHub 失敗: {e}")
         return False
 
-
 # --- 5. 數據讀取和解析函數 (用於查看頁面) ---
-def read_and_parse_records():
+@st.cache_data(show_spinner=False)
+def read_and_parse_records_to_df(current_time):
     """從 GitHub 讀取 TXT 檔案並解析為 DataFrame"""
-    if not GITHUB_TOKEN:
-        return pd.DataFrame()
-
-    try:
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(REPO_NAME)
-        contents = repo.get_contents(FILE_PATH)
-        content = base64.b64decode(contents.content).decode('utf-8')
-    except Exception:
-        return pd.DataFrame()
+    content, _ = read_full_content()
+    if not content: return pd.DataFrame()
 
     records = []
     # 匹配 TXT 檔案中包含 Conversion 信息的結構
@@ -185,21 +180,157 @@ def read_and_parse_records():
         match = pattern.match(line)
         if match:
             data = match.groupdict()
-            # 調整欄位名稱
             data['Amount Recorded'] = f"{data.pop('Total').strip()} {data.pop('Currency').strip()}"
             records.append(data)
     
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    if df.empty: return df
+    
+    # 添加 ID 和排序
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
+    df['Record_ID'] = df.index 
+    return df
 
 
-# --- 6. 頁面渲染函數 A：提交費用 ---
+# --- 6. 刪除/更新 執行函數 ---
+
+def execute_github_action(action, record_id_to_target, new_data=None):
+    """執行刪除或更新操作，並寫回整個檔案"""
+    full_content, sha = read_full_content()
+    
+    if full_content is None or sha is None:
+        st.error("❌ 無法讀取 GitHub 檔案或 SHA 缺失。")
+        return False
+
+    df = read_and_parse_records_to_df(datetime.now()) # 重新讀取最新的 DF
+    
+    if df.empty or record_id_to_target not in df['Record_ID'].values:
+        st.error("❌ 找不到目標記錄。")
+        return False
+
+    target_row = df[df['Record_ID'] == record_id_to_target].iloc[0]
+    
+    # 標記要修改或刪除的原始行
+    target_line_start = f"[{target_row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}] User: {target_row['User']}"
+    
+    original_lines = full_content.strip().split('\n')
+    new_content_lines = []
+    
+    for line in original_lines:
+        if line.startswith(target_line_start):
+            if action == 'delete':
+                continue # 跳過這行，實現刪除
+            elif action == 'update' and new_data:
+                # 重新創建新的記錄行
+                new_line = (
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"User: {new_data['user_name']}, "
+                    f"Shop: {new_data['shop_name']}, "
+                    f"Total: {new_data['total_amount']:.2f} {new_data['currency']}, "
+                    f"Date: {new_data['transaction_date']}, "
+                    f"Remarks: {new_data['remarks']}, "
+                    f"Conversion: {new_data.get('conversion_notes', 'Manually Edited')}\n"
+                )
+                new_content_lines.append(new_line.strip())
+                continue
+
+        new_content_lines.append(line)
+
+    new_content = "\n".join(new_content_lines) + "\n"
+    
+    try:
+        g = Github(GITHUB_TOKEN)
+        repo = g.get_repo(REPO_NAME)
+        
+        commit_msg = f"feat: {action.capitalize()} record ID {record_id_to_target}"
+        
+        repo.update_file(FILE_PATH, commit_msg, new_content, sha)
+        st.session_state.df_records = pd.DataFrame() # 清除緩存
+        st.success(f"✅ {action.capitalize()} 操作成功完成！")
+        return True
+    except Exception as e:
+        st.error(f"❌ GitHub {action.capitalize()} 失敗: {e}")
+        return False
+
+
+# --- 7. 編輯和刪除 UI 輔助函數 ---
+
+def display_delete_confirmation(record):
+    """顯示刪除確認框"""
+    st.error(f"⚠️ 確認刪除記錄 (ID: {record['Record_ID']})：{record['Shop']} - {record['Amount Recorded']}？")
+    
+    col_confirm, col_cancel = st.columns(2)
+    
+    with col_confirm:
+        if st.button("確定刪除", key=f"confirm_delete_{record['Record_ID']}"):
+            if execute_github_action('delete', record['Record_ID']):
+                st.session_state.delete_confirm_id = None
+                st.rerun()
+
+    with col_cancel:
+        if st.button("取消刪除", key=f"cancel_delete_{record['Record_ID']}"):
+            st.session_state.delete_confirm_id = None
+            st.rerun()
+
+
+def display_edit_form(record):
+    """顯示編輯選定記錄的表單"""
+    st.subheader(f"✏️ 編輯記錄 (ID: {record['Record_ID']})")
+    
+    amount_parts = record['Amount Recorded'].split()
+    current_amount = float(amount_parts[0])
+    current_currency = amount_parts[-1]
+    
+    # 假設記錄的日期是 YYYY-MM-DD 格式
+    current_date = datetime.strptime(record['Date'], '%Y-%m-%d').date()
+
+    with st.form(key=f"edit_form_{record['Record_ID']}"):
+        edited_shop = st.text_input("商家名稱", value=record['Shop'])
+        edited_amount = st.number_input("總金額", value=current_amount, format="%.2f")
+        edited_currency = st.selectbox("貨幣", options=AVAILABLE_CURRENCIES, index=AVAILABLE_CURRENCIES.index(current_currency))
+        edited_date = st.date_input("交易日期", value=current_date)
+        edited_remarks = st.text_input("備註", value=record['Remarks'])
+        
+        st.markdown("---")
+
+        col_save, col_cancel = st.columns(2)
+        
+        if col_save.form_submit_button("✅ 保存更改"):
+            
+            # 1. 執行轉換（如果需要）
+            converted_amount, final_currency, _ = convert_currency(edited_amount, edited_currency)
+            conversion_notes = f"Manually edited and converted from {edited_amount} {edited_currency} to {converted_amount:.2f} {final_currency}"
+
+            # 2. 準備新數據
+            updated_data = {
+                "user_name": record['User'], # 用戶名不允許編輯
+                "remarks": edited_remarks,
+                "shop_name": edited_shop,
+                "total_amount": converted_amount,
+                "currency": final_currency,
+                "transaction_date": edited_date.strftime("%Y-%m-%d"),
+                "conversion_notes": conversion_notes
+            }
+            
+            # 3. 執行更新
+            if execute_github_action('update', record['Record_ID'], updated_data):
+                st.session_state.edit_id = None
+                st.rerun()
+            
+        if col_cancel.form_submit_button("❌ 取消"):
+            st.session_state.edit_id = None
+            st.rerun()
+
+
+# --- 8. 頁面渲染函數 A：提交費用 (略) ---
 
 def render_submission_page():
-    """渲染費用提交頁面 (包含 OCR 和手動輸入)"""
+    """渲染費用提交頁面 (OCR/手動)"""
+    # (此函數內容與先前版本相同，用於提交和寫入 GitHub)
     st.title("💸 提交費用")
     st.markdown("---")
 
-    # 模式選擇
     submission_mode = st.radio(
         "選擇數據輸入方式：",
         ("📸 圖片 OCR 分析", "✍️ 手動輸入"),
@@ -216,7 +347,6 @@ def render_submission_page():
         ocr_data = None
         uploaded_file = None
         
-        # 根據模式顯示不同的輸入字段
         if submission_mode == "📸 圖片 OCR 分析":
             st.subheader("圖片上傳與 AI 分析")
             uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
@@ -226,26 +356,22 @@ def render_submission_page():
             manual_shop = st.text_input("商家名稱 (Shop Name)")
             manual_amount = st.number_input("總金額 (Total Amount)", min_value=0.01, format="%.2f")
             
-            # 限制貨幣選擇並設定 JPY 為預設值
             manual_currency = st.selectbox(
                 "貨幣 (Currency)", 
                 options=["JPY", "HKD"], 
-                index=0, # JPY 預設
+                index=0, 
                 key="manual_currency_select"
             )
             
             manual_date = st.date_input("交易日期 (Date)", value="today")
 
-        # 提交按鈕
         submitted = st.form_submit_button("執行並提交記錄")
 
-        # 提交後的處理邏輯
         if submitted:
             if submission_mode == "📸 圖片 OCR 分析":
                 if uploaded_file is None:
                     st.warning("請上傳收據圖片才能進行分析。")
                     return
-                
                 with st.spinner('AI 正在分析收據...'):
                     ocr_data = analyze_receipt(uploaded_file)
             
@@ -261,7 +387,6 @@ def render_submission_page():
                     st.error("請填寫商家名稱、金額和貨幣。")
                     return
             
-            # --- 統一的數據處理和寫入邏輯 ---
             if ocr_data:
                 
                 original_currency = ocr_data.get("currency", "N/A").upper()
@@ -270,7 +395,6 @@ def render_submission_page():
                 converted_amount = original_amount
                 conversion_info = f"Original: {original_amount} {original_currency}"
                 
-                # --- 執行貨幣轉換 ---
                 if original_currency in TARGET_CURRENCIES:
                     converted_amount, base_currency, rate = convert_currency(original_amount, original_currency)
                     
@@ -279,16 +403,14 @@ def render_submission_page():
                             f"Original: {original_amount} {original_currency}. "
                             f"Converted to {converted_amount:.2f} {base_currency} (Rate: 1:{rate:.4f})"
                         )
-                        # 將記錄數據更新為轉換後的值
                         ocr_data['total_amount'] = converted_amount
                         ocr_data['currency'] = base_currency
                     else:
                          st.warning(f"⚠️ 匯率轉換失敗。將使用原始值記錄：{original_amount} {original_currency}。")
                          conversion_info = f"Original: {original_amount} {original_currency}. 轉換失敗，使用原始值記錄。"
 
-                st.info(conversion_info) # 顯示轉換信息
+                st.info(conversion_info)
                 
-                # 組合最終記錄數據
                 final_record = {
                     "user_name": user_name,
                     "remarks": remarks,
@@ -296,7 +418,7 @@ def render_submission_page():
                     "total_amount": ocr_data.get("total_amount", 0.0),
                     "currency": ocr_data.get("currency", original_currency),
                     "transaction_date": ocr_data.get("transaction_date", datetime.now().strftime("%Y-%m-%d")),
-                    "conversion_notes": conversion_info # 記錄轉換過程
+                    "conversion_notes": conversion_info
                 }
 
                 st.subheader("📝 提取和確認記錄:")
@@ -308,28 +430,68 @@ def render_submission_page():
                 if submission_mode == "📸 圖片 OCR 分析":
                      st.error("分析失敗，請檢查圖片或嘗試手動輸入。")
 
-# --- 7. 頁面渲染函數 B：查看記錄 ---
+
+# --- 9. 頁面渲染函數 B：查看記錄 (包含按鈕) ---
 
 def render_view_records_page():
-    """渲染查看記錄頁面"""
+    """渲染查看記錄頁面，包含編輯和刪除按鈕"""
     st.title("📚 歷史費用記錄")
-    st.info(f"正在從 GitHub 儲存庫 `{REPO_NAME}` 讀取檔案 `{FILE_PATH}`...")
     
-    with st.spinner("從 GitHub 下載並解析數據中..."):
-        df = read_and_parse_records()
+    # 只有當 session state 為空時才重新加載數據
+    if st.session_state.df_records.empty:
+        with st.spinner("從 GitHub 下載並解析數據中..."):
+            # 傳遞時間參數，強制 st.cache_data 重新運行 (當 write_to_github_file 被調用時)
+            st.session_state.df_records = read_and_parse_records_to_df(datetime.now()) 
 
-    if not df.empty:
-        st.subheader(f"找到 {len(df)} 條記錄")
-        # 重新排序，讓最新的記錄在最上方
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.sort_values(by='timestamp', ascending=False)
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.warning("檔案讀取成功，但找不到任何可解析的費用記錄。")
-        st.code(f"請在提交頁面提交一條記錄，檔案會自動創建於 GitHub：{FILE_PATH}")
+    df = st.session_state.df_records
+
+    if df.empty:
+        st.warning("當前檔案中沒有可解析的費用記錄。")
+        return
+
+    st.subheader(f"找到 {len(df)} 條記錄")
+    st.markdown("---")
+
+    # 手動渲染每條記錄並添加按鈕
+    for index, row in df.iterrows():
+        record_id = row['Record_ID']
+        
+        # 使用 Columns 佈局：一列顯示數據，兩列顯示按鈕
+        col_data, col_edit, col_delete = st.columns([10, 1, 1])
+
+        # 顯示數據
+        record_summary = (
+            f"**日期:** {row['Date']} | "
+            f"**商家:** {row['Shop']} | "
+            f"**金額:** {row['Amount Recorded']} | "
+            f"**用戶:** {row['User']} | "
+            f"**備註:** {row['Remarks']}"
+        )
+        col_data.markdown(record_summary)
+
+        # 編輯按鈕
+        if col_edit.button("✏️ 編輯", key=f'edit_{record_id}'):
+            st.session_state.edit_id = record_id
+            st.session_state.delete_confirm_id = None
+            st.rerun()
+
+        # 刪除按鈕
+        if col_delete.button("🗑️ 刪除", key=f'delete_{record_id}'):
+            st.session_state.delete_confirm_id = record_id
+            st.session_state.edit_id = None
+            st.rerun()
+
+        st.markdown("---")
+        
+        # 處理交互式 UI
+        if st.session_state.edit_id == record_id:
+            display_edit_form(row)
+            
+        if st.session_state.delete_confirm_id == record_id:
+            display_delete_confirmation(row)
 
 
-# --- 8. 應用程式主運行流程 (切換頁面) ---
+# --- 10. 應用程式主運行流程 (切換頁面) ---
 
 # 側邊欄導航 (模擬多頁面)
 st.sidebar.title("導航")
