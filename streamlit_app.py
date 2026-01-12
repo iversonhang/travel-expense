@@ -7,16 +7,13 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 
-# 為了在本地運行時加載 .env
+# 外部依賴
 from dotenv import load_dotenv 
-
-# Gemini/AI 相關
 from google import genai
 from google.genai import types
 from PIL import Image
-
-# GitHub 寫入相關
 from github import Github
+from forex_python.converter import CurrencyRates # 匯率轉換
 
 # --- 0. 環境變數設定與初始化 ---
 load_dotenv()
@@ -29,8 +26,12 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 # 設置您的 GitHub 儲存庫信息
 # !! 請務必替換成您自己的 GitHub 用戶名和儲存庫名稱 !!
-REPO_NAME = "iversonhang\travel-expense" 
+REPO_NAME = "iversonhang/travel-expense" 
 FILE_PATH = "expense_records.txt"
+
+# 貨幣轉換設定
+BASE_CURRENCY = "USD"
+TARGET_CURRENCIES = ["HKD", "JPY"]
 
 @st.cache_resource
 def init_gemini_client():
@@ -60,9 +61,27 @@ RECEIPT_SCHEMA = types.Schema(
 )
 
 
-# --- 2. 核心 Gemini 處理函數 ---
+# --- 2. 匯率轉換函數 ---
+@st.cache_data(ttl=3600) # 緩存匯率 1 小時
+def convert_currency(amount, from_currency):
+    """將金額轉換為基礎貨幣 (USD)"""
+    if from_currency == BASE_CURRENCY:
+        return amount, BASE_CURRENCY, 1.0
+
+    try:
+        c = CurrencyRates(force_decimal=True)
+        # 獲取即時匯率
+        rate = c.get_rate(from_currency, BASE_CURRENCY)
+        converted_amount = amount * rate
+        return float(converted_amount), BASE_CURRENCY, float(rate)
+    except Exception as e:
+        # 轉換失敗，返回原始數據
+        return amount, from_currency, 0.0 
+
+
+# --- 3. 核心 Gemini 處理函數 ---
 def analyze_receipt(uploaded_file):
-    """呼叫 Gemini API 進行收據 OCR 分析"""
+    # ... (分析邏輯與先前版本相同) ...
     if not gemini_client:
         return None
         
@@ -88,22 +107,23 @@ def analyze_receipt(uploaded_file):
         return None
 
 
-# --- 3. GitHub 寫入函數 ---
+# --- 4. GitHub 寫入函數 ---
 def write_to_github_file(record_data):
-    """使用 GitHub API 將記錄寫入 TXT 檔案"""
+    """使用 GitHub API 將記錄寫入 TXT 檔案 (包含轉換信息)"""
     if not GITHUB_TOKEN:
         st.error("❌ GitHub Token 缺失，無法寫入檔案。")
         return False
 
     try:
-        # 將記錄轉換為單行文本格式
+        # 將記錄轉換為單行文本格式 (新增 Conversion Notes)
         record_text = (
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"User: {record_data['user_name']}, "
             f"Shop: {record_data['shop_name']}, "
-            f"Total: {record_data['total_amount']} {record_data['currency']}, "
+            f"Total: {record_data['total_amount']:.2f} {record_data['currency']}, "
             f"Date: {record_data['transaction_date']}, "
-            f"Remarks: {record_data['remarks']}\n"
+            f"Remarks: {record_data['remarks']}, "
+            f"Conversion: {record_data.get('conversion_notes', 'N/A')}\n"
         )
         
         g = Github(GITHUB_TOKEN)
@@ -115,7 +135,6 @@ def write_to_github_file(record_data):
             existing_content = base64.b64decode(contents.content).decode('utf-8')
             sha = contents.sha
         except Exception:
-            # 檔案不存在，視為創建新檔案
             existing_content = ""
             sha = None
             
@@ -135,7 +154,7 @@ def write_to_github_file(record_data):
         return False
 
 
-# --- 4. 數據讀取和解析函數 (用於查看頁面) ---
+# --- 5. 數據讀取和解析函數 (用於查看頁面) ---
 def read_and_parse_records():
     """從 GitHub 讀取 TXT 檔案並解析為 DataFrame"""
     if not GITHUB_TOKEN:
@@ -147,18 +166,18 @@ def read_and_parse_records():
         contents = repo.get_contents(FILE_PATH)
         content = base64.b64decode(contents.content).decode('utf-8')
     except Exception:
-        # 檔案不存在或讀取失敗
         return pd.DataFrame()
 
     records = []
-    # 正則表達式來匹配每行的結構
+    # 匹配 TXT 檔案中包含 Conversion 信息的結構
     pattern = re.compile(
         r'^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] '
         r'User: (?P<User>.*?), '
         r'Shop: (?P<Shop>.*?), '
         r'Total: (?P<Total>.*?)\s*(?P<Currency>[A-Z]{3}?), '
         r'Date: (?P<Date>\d{4}-\d{2}-\d{2}), '
-        r'Remarks: (?P<Remarks>.*?)$',
+        r'Remarks: (?P<Remarks>.*?), '
+        r'Conversion: (?P<Conversion>.*?)$',
         re.MULTILINE
     )
 
@@ -167,29 +186,26 @@ def read_and_parse_records():
         if match:
             data = match.groupdict()
             # 調整欄位名稱
-            data['Amount'] = f"{data.pop('Total').strip()} {data.pop('Currency').strip()}"
+            data['Amount Recorded'] = f"{data.pop('Total').strip()} {data.pop('Currency').strip()}"
             records.append(data)
     
     return pd.DataFrame(records)
 
 
-# --- 5. 頁面渲染函數 ---
-
-# streamlit_app.py (修改後的 render_submission_page 函數)
+# --- 6. 頁面渲染函數 A：提交費用 ---
 
 def render_submission_page():
-    """渲染費用提交頁面 (主頁面)，新增手動輸入模式"""
+    """渲染費用提交頁面 (包含 OCR 和手動輸入)"""
     st.title("💸 提交費用")
     st.markdown("---")
 
-    # --- 1. 模式選擇 ---
+    # 模式選擇
     submission_mode = st.radio(
         "選擇數據輸入方式：",
         ("📸 圖片 OCR 分析", "✍️ 手動輸入"),
         key="submission_mode"
     )
 
-    # VVVVVV 單頁表單 VVVVVV
     with st.form("expense_form"):
         st.subheader("基本信息")
         user_name = st.selectbox("誰支付了？", options=['Mary', 'John', 'Other'])
@@ -197,51 +213,72 @@ def render_submission_page():
 
         st.markdown("---")
 
-        ocr_data = None  # 用於存儲 AI 分析或手動輸入的結果
+        ocr_data = None
         uploaded_file = None
         
-        # --- 2. 根據模式顯示不同的輸入字段 ---
+        # 根據模式顯示不同的輸入字段
         if submission_mode == "📸 圖片 OCR 分析":
             st.subheader("圖片上傳與 AI 分析")
             uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
 
         elif submission_mode == "✍️ 手動輸入":
             st.subheader("手動輸入費用細節")
-            # 添加手動輸入欄位
             manual_shop = st.text_input("商家名稱 (Shop Name)")
             manual_amount = st.number_input("總金額 (Total Amount)", min_value=0.01, format="%.2f")
-            manual_currency = st.text_input("貨幣 (Currency)", value="TWD")
+            manual_currency = st.text_input("貨幣 (Currency)", value="HKD")
             manual_date = st.date_input("交易日期 (Date)", value="today")
 
-        # --- 3. 提交按鈕 ---
+        # 提交按鈕
         submitted = st.form_submit_button("執行並提交記錄")
 
-        # --- 4. 提交後的處理邏輯 ---
+        # 提交後的處理邏輯
         if submitted:
             if submission_mode == "📸 圖片 OCR 分析":
                 if uploaded_file is None:
                     st.warning("請上傳收據圖片才能進行分析。")
-                    return # 終止處理
+                    return
                 
                 with st.spinner('AI 正在分析收據...'):
                     ocr_data = analyze_receipt(uploaded_file)
             
             elif submission_mode == "✍️ 手動輸入":
-                # 手動模式，直接構造 ocr_data 字典
                 if manual_shop and manual_amount and manual_currency:
                     ocr_data = {
                         "shop_name": manual_shop,
                         "total_amount": float(manual_amount),
                         "currency": manual_currency.upper(),
-                        "transaction_date": manual_date.strftime("%Y-%m-%d") # 格式化為 YYYY-MM-DD
+                        "transaction_date": manual_date.strftime("%Y-%m-%d")
                     }
                 else:
                     st.error("請填寫商家名稱、金額和貨幣。")
-                    return # 終止處理
+                    return
             
-            # --- 5. 統一的數據處理和寫入邏輯 ---
+            # --- 統一的數據處理和寫入邏輯 ---
             if ocr_data:
-                st.success("數據準備完成！")
+                
+                original_currency = ocr_data.get("currency", "N/A").upper()
+                original_amount = ocr_data.get("total_amount", 0.0)
+                
+                converted_amount = original_amount
+                conversion_info = f"Original: {original_amount} {original_currency}"
+                
+                # --- 執行貨幣轉換 ---
+                if original_currency in TARGET_CURRENCIES:
+                    converted_amount, base_currency, rate = convert_currency(original_amount, original_currency)
+                    
+                    if rate > 0.0:
+                        conversion_info = (
+                            f"Original: {original_amount} {original_currency}. "
+                            f"Converted to {converted_amount:.2f} {base_currency} (Rate: 1:{rate:.4f})"
+                        )
+                        # 將記錄數據更新為轉換後的值
+                        ocr_data['total_amount'] = converted_amount
+                        ocr_data['currency'] = base_currency
+                    else:
+                         st.warning(f"⚠️ 匯率轉換失敗。將使用原始值記錄：{original_amount} {original_currency}。")
+                         conversion_info = f"Original: {original_amount} {original_currency}. 轉換失敗，使用原始值記錄。"
+
+                st.info(conversion_info) # 顯示轉換信息
                 
                 # 組合最終記錄數據
                 final_record = {
@@ -249,24 +286,21 @@ def render_submission_page():
                     "remarks": remarks,
                     "shop_name": ocr_data.get("shop_name", "N/A"),
                     "total_amount": ocr_data.get("total_amount", 0.0),
-                    "currency": ocr_data.get("currency", "N/A"),
-                    "transaction_date": ocr_data.get("transaction_date", datetime.now().strftime("%Y-%m-%d")) 
+                    "currency": ocr_data.get("currency", original_currency),
+                    "transaction_date": ocr_data.get("transaction_date", datetime.now().strftime("%Y-%m-%d")),
+                    "conversion_notes": conversion_info # 記錄轉換過程
                 }
 
                 st.subheader("📝 提取和確認記錄:")
                 st.json(final_record)
                 
-                # 寫入 GitHub TXT 檔案
                 with st.spinner('正在寫入 GitHub 儲存庫...'):
                     write_to_github_file(final_record)
             else:
-                # 僅在 OCR 模式下，如果 ocr_data 為 None，才會執行這裏
                 if submission_mode == "📸 圖片 OCR 分析":
                      st.error("分析失敗，請檢查圖片或嘗試手動輸入。")
 
-# --- 側邊欄和主運行流程 (保持不變) ---
-# ...
-
+# --- 7. 頁面渲染函數 B：查看記錄 ---
 
 def render_view_records_page():
     """渲染查看記錄頁面"""
@@ -283,22 +317,22 @@ def render_view_records_page():
         df = df.sort_values(by='timestamp', ascending=False)
         st.dataframe(df, use_container_width=True)
     else:
-        st.warning("當前檔案中沒有可解析的費用記錄。")
+        st.warning("檔案讀取成功，但找不到任何可解析的費用記錄。")
         st.code(f"請在提交頁面提交一條記錄，檔案會自動創建於 GitHub：{FILE_PATH}")
 
 
-# --- 6. 應用程式主運行流程 (切換頁面) ---
+# --- 8. 應用程式主運行流程 (切換頁面) ---
 
 # 側邊欄導航 (模擬多頁面)
 st.sidebar.title("導航")
 page = st.sidebar.radio(
     "選擇功能頁面：",
-    ("提交費用 (OCR)", "查看記錄"),
+    ("提交費用 (OCR/手動)", "查看記錄"),
     key="page_selection"
 )
 
 # 根據選擇渲染對應的頁面
-if page == "提交費用 (OCR)":
+if page == "提交費用 (OCR/手動)":
     render_submission_page()
 elif page == "查看記錄":
     render_view_records_page()
