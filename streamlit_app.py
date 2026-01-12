@@ -345,7 +345,7 @@ def render_submission_page():
 
     with st.form("expense_form"):
         st.subheader("基本信息")
-        user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Oliver'])
+        user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Olivia'])
         remarks = st.text_input("備註 (可選)", key="remarks_input")
         
         is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=False) # <-- 共享複選框
