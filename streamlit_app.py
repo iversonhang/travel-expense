@@ -156,7 +156,7 @@ def analyze_receipt(image_to_analyze):
     
     try:
         response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash', contents=[prompt, image_to_analyze],
+            model='gemini-2.5-flash-lite', contents=[prompt, image_to_analyze],
             config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=RECEIPT_SCHEMA)
         )
         return json.loads(response.text)
