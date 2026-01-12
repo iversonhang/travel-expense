@@ -30,7 +30,7 @@ REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 # 貨幣轉換設定
-BASE_CURRENCY = "JPY"
+BASE_CURRENCY = "USD"
 TARGET_CURRENCIES = ["HKD", "JPY"]
 
 @st.cache_resource
@@ -81,7 +81,7 @@ def convert_currency(amount, from_currency):
 
 # --- 3. 核心 Gemini 處理函數 ---
 def analyze_receipt(uploaded_file):
-    # ... (分析邏輯與先前版本相同) ...
+    """呼叫 Gemini API 進行收據 OCR 分析"""
     if not gemini_client:
         return None
         
@@ -194,35 +194,47 @@ def read_and_parse_records():
 
 # --- 6. 頁面渲染函數 A：提交費用 ---
 
-# streamlit_app.py (修改 render_submission_page 函數內部)
-
 def render_submission_page():
-    # ... (前面的代碼保持不變) ...
+    """渲染費用提交頁面 (包含 OCR 和手動輸入)"""
+    st.title("💸 提交費用")
+    st.markdown("---")
+
+    # 模式選擇
+    submission_mode = st.radio(
+        "選擇數據輸入方式：",
+        ("📸 圖片 OCR 分析", "✍️ 手動輸入"),
+        key="submission_mode"
+    )
 
     with st.form("expense_form"):
-        # ... (基本信息和模式選擇保持不變) ...
+        st.subheader("基本信息")
+        user_name = st.selectbox("誰支付了？", options=['Mary', 'John', 'Other'])
+        remarks = st.text_input("備註 (可選)", key="remarks_input")
+
+        st.markdown("---")
+
+        ocr_data = None
+        uploaded_file = None
         
-        # --- 2. 根據模式顯示不同的輸入字段 ---
+        # 根據模式顯示不同的輸入字段
         if submission_mode == "📸 圖片 OCR 分析":
-            # ... (OCR 邏輯保持不變) ...
-            
+            st.subheader("圖片上傳與 AI 分析")
+            uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
+
         elif submission_mode == "✍️ 手動輸入":
             st.subheader("手動輸入費用細節")
             manual_shop = st.text_input("商家名稱 (Shop Name)")
             manual_amount = st.number_input("總金額 (Total Amount)", min_value=0.01, format="%.2f")
             
-            # --- 關鍵修改：使用 st.selectbox 限制貨幣選擇並設定預設值 ---
+            # 限制貨幣選擇並設定 JPY 為預設值
             manual_currency = st.selectbox(
                 "貨幣 (Currency)", 
-                options=["JPY", "HKD"], # 限制選項
-                index=0, # JPY 是列表中的第一個選項 (索引 0)，因此是預設值
+                options=["JPY", "HKD"], 
+                index=0, # JPY 預設
                 key="manual_currency_select"
             )
-            # ----------------------------------------------------------------------
             
             manual_date = st.date_input("交易日期 (Date)", value="today")
-
-        # ... (後續的提交按鈕和處理邏輯保持不變) ...
 
         # 提交按鈕
         submitted = st.form_submit_button("執行並提交記錄")
