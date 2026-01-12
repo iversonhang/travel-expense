@@ -2,11 +2,13 @@ import streamlit as st
 import os
 import json
 import base64
+import re
+import pandas as pd
 from datetime import datetime
 from io import BytesIO
 
-# 為了在本地運行時加載 .env，但在 Streamlit Cloud 上會使用 Secrets
-from dotenv import load_dotenv
+# 為了在本地運行時加載 .env
+from dotenv import load_dotenv 
 
 # Gemini/AI 相關
 from google import genai
@@ -17,10 +19,9 @@ from PIL import Image
 from github import Github
 
 # --- 0. 環境變數設定與初始化 ---
-# 僅在本地環境運行時加載 .env
 load_dotenv()
 
-st.set_page_config(page_title="AI 旅行費用記錄器", layout="centered")
+st.set_page_config(page_title="AI 費用記錄系統", layout="centered")
 
 # 從環境變數或 Streamlit Secrets 獲取金鑰
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -28,14 +29,14 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 # 設置您的 GitHub 儲存庫信息
 # !! 請務必替換成您自己的 GitHub 用戶名和儲存庫名稱 !!
-REPO_NAME = "iversonhang/travel-expense" 
+REPO_NAME = "YOUR_USERNAME/YOUR_REPO_NAME" 
 FILE_PATH = "expense_records.txt"
 
 @st.cache_resource
 def init_gemini_client():
     """初始化 Gemini 客戶端"""
     if not GEMINI_API_KEY:
-        st.error("❌ 錯誤：GEMINI_API_KEY 環境變數缺失。請在 Streamlit Secrets 或 .env 中設定。")
+        st.error("❌ 錯誤：GEMINI_API_KEY 環境變數缺失。")
         return None
     try:
         return genai.Client(api_key=GEMINI_API_KEY)
@@ -91,7 +92,7 @@ def analyze_receipt(uploaded_file):
 def write_to_github_file(record_data):
     """使用 GitHub API 將記錄寫入 TXT 檔案"""
     if not GITHUB_TOKEN:
-        st.error("❌ GitHub Token 缺失，無法寫入檔案。請在 Streamlit Secrets 中設定 GITHUB_TOKEN。")
+        st.error("❌ GitHub Token 缺失，無法寫入檔案。")
         return False
 
     try:
@@ -111,7 +112,6 @@ def write_to_github_file(record_data):
         # 嘗試獲取現有內容
         try:
             contents = repo.get_contents(FILE_PATH)
-            # 解碼現有內容 (GitHub API 返回 Base64)
             existing_content = base64.b64decode(contents.content).decode('utf-8')
             sha = contents.sha
         except Exception:
@@ -122,7 +122,6 @@ def write_to_github_file(record_data):
         updated_content = existing_content + record_text
         commit_message = f"feat: Add new expense record for {record_data['user_name']}"
         
-        # 執行創建或更新檔案操作
         if sha:
             repo.update_file(FILE_PATH, commit_message, updated_content, sha)
         else:
@@ -136,55 +135,125 @@ def write_to_github_file(record_data):
         return False
 
 
-# --- 4. Streamlit UI 介面 ---
+# --- 4. 數據讀取和解析函數 (用於查看頁面) ---
+def read_and_parse_records():
+    """從 GitHub 讀取 TXT 檔案並解析為 DataFrame"""
+    if not GITHUB_TOKEN:
+        return pd.DataFrame()
 
-st.title("💸 AI 旅行費用記錄器")
-st.markdown("---")
+    try:
+        g = Github(GITHUB_TOKEN)
+        repo = g.get_repo(REPO_NAME)
+        contents = repo.get_contents(FILE_PATH)
+        content = base64.b64decode(contents.content).decode('utf-8')
+    except Exception:
+        # 檔案不存在或讀取失敗
+        return pd.DataFrame()
 
-# 這裡使用 st.form 來確保在提交按鈕按下之前，程式碼不會執行後續的數據處理
-with st.form("expense_form"):
-    st.subheader("輸入費用信息")
-    user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Olivia'])
-    remarks = st.text_input("備註 (可選)", key="remarks_input")
+    records = []
+    # 正則表達式來匹配每行的結構
+    pattern = re.compile(
+        r'^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] '
+        r'User: (?P<User>.*?), '
+        r'Shop: (?P<Shop>.*?), '
+        r'Total: (?P<Total>.*?)\s*(?P<Currency>[A-Z]{3}?), '
+        r'Date: (?P<Date>\d{4}-\d{2}-\d{2}), '
+        r'Remarks: (?P<Remarks>.*?)$',
+        re.MULTILINE
+    )
+
+    for line in content.strip().split('\n'):
+        match = pattern.match(line)
+        if match:
+            data = match.groupdict()
+            # 調整欄位名稱
+            data['Amount'] = f"{data.pop('Total').strip()} {data.pop('Currency').strip()}"
+            records.append(data)
     
+    return pd.DataFrame(records)
+
+
+# --- 5. 頁面渲染函數 ---
+
+def render_submission_page():
+    """渲染費用提交頁面 (主頁面)"""
+    st.title("💸 提交費用 (OCR)")
+    st.markdown("使用 Gemini AI 分析收據，並將數據記錄到 GitHub TXT 檔案。")
     st.markdown("---")
-    
-    uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
-    
-    # !!! 這裡定義了 submitted 變數 !!!
-    submitted = st.form_submit_button("執行分析並提交到 GitHub")
-    
-    # !!! 依賴 submitted 的邏輯必須在 form 塊內且在 submitted 定義之後 !!!
-    if submitted and uploaded_file is not None:
-        
-        # --- 流程開始 ---
-        with st.spinner('AI 正在分析收據...'):
-            ocr_data = analyze_receipt(uploaded_file)
-        
-        if ocr_data:
-            st.success("收據分析完成！")
-            
-            # 組合最終記錄數據
-            final_record = {
-                "user_name": user_name,
-                "remarks": remarks,
-                "shop_name": ocr_data.get("shop_name", "N/A"),
-                "total_amount": ocr_data.get("total_amount", 0),
-                "currency": ocr_data.get("currency", "N/A"),
-                "transaction_date": ocr_data.get("transaction_date", datetime.now().strftime("%Y-%m-%d")) 
-            }
 
-            st.subheader("📝 提取和確認記錄:")
-            st.json(final_record)
+    with st.form("expense_form"):
+        st.subheader("輸入費用信息")
+        user_name = st.selectbox("誰支付了？", options=['Mary', 'John', 'Other'])
+        remarks = st.text_input("備註 (可選)", key="remarks_input")
+        
+        st.markdown("---")
+        
+        uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
+        
+        submitted = st.form_submit_button("執行分析並提交到 GitHub")
+        
+        if submitted and uploaded_file is not None:
+            # --- 流程開始 ---
+            with st.spinner('AI 正在分析收據...'):
+                ocr_data = analyze_receipt(uploaded_file)
             
-            # 寫入 GitHub TXT 檔案
-            with st.spinner('正在寫入 GitHub 儲存庫...'):
-                write_to_github_file(final_record)
-        else:
-            st.error("分析失敗，請檢查圖片或 Gemini API 狀態。")
+            if ocr_data:
+                st.success("收據分析完成！")
+                
+                final_record = {
+                    "user_name": user_name,
+                    "remarks": remarks,
+                    "shop_name": ocr_data.get("shop_name", "N/A"),
+                    "total_amount": ocr_data.get("total_amount", 0),
+                    "currency": ocr_data.get("currency", "N/A"),
+                    "transaction_date": ocr_data.get("transaction_date", datetime.now().strftime("%Y-%m-%d")) 
+                }
+
+                st.subheader("📝 提取和確認記錄:")
+                st.json(final_record)
+                
+                with st.spinner('正在寫入 GitHub 儲存庫...'):
+                    write_to_github_file(final_record)
+            else:
+                st.error("分析失敗，請檢查圖片或 Gemini API 狀態。")
+        
+        elif submitted and uploaded_file is None:
+            st.warning("請上傳收據圖片才能進行分析。")
+
+
+def render_view_records_page():
+    """渲染查看記錄頁面"""
+    st.title("📚 歷史費用記錄")
+    st.info(f"正在從 GitHub 儲存庫 `{REPO_NAME}` 讀取檔案 `{FILE_PATH}`...")
     
-    elif submitted and uploaded_file is None:
-        st.warning("請上傳收據圖片才能進行分析。")
+    with st.spinner("從 GitHub 下載並解析數據中..."):
+        df = read_and_parse_records()
+
+    if not df.empty:
+        st.subheader(f"找到 {len(df)} 條記錄")
+        # 重新排序，讓最新的記錄在最上方
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values(by='timestamp', ascending=False)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.warning("當前檔案中沒有可解析的費用記錄。")
+        st.code(f"請在提交頁面提交一條記錄，檔案會自動創建於 GitHub：{FILE_PATH}")
+
+
+# --- 6. 應用程式主運行流程 (切換頁面) ---
+
+# 側邊欄導航 (模擬多頁面)
+st.sidebar.title("導航")
+page = st.sidebar.radio(
+    "選擇功能頁面：",
+    ("提交費用 (OCR)", "查看記錄"),
+    key="page_selection"
+)
+
+# 根據選擇渲染對應的頁面
+if page == "提交費用 (OCR)":
+    render_submission_page()
+elif page == "查看記錄":
+    render_view_records_page()
 
 st.markdown("---")
-st.info(f"當前運行環境的 `REPO_NAME` 為：`{REPO_NAME}`")
