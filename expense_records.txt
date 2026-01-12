@@ -3,3 +3,4 @@
 [2026-01-12 09:26:52] User: TSH, Shop: Rakuten Travel, Total: 0.00 HKD, Date: 2026-01-10, Remarks: shared, Shared: Yes, OriginalAmount: 0.00, OriginalCurrency: , Conversion: Original: 0 . Stored as HKD. No conversion needed.
 [2026-01-12 09:29:42] User: TSH, Shop: Rakuten Travel, Total: 0.00 HKD, Date: 2026-01-10, Remarks: shared, Shared: Yes, OriginalAmount: 0.00, OriginalCurrency: , Conversion: Original: 0 . Stored as HKD. No conversion needed.
 [2026-01-12 09:31:16] User: TSH, Shop: 18-19 Hotel, Total: 5896.35 HKD, Date: 2026-01-12, Remarks: Shared, Shared: No, OriginalAmount: 5896.35, OriginalCurrency: HKD, Conversion: Original: 5896.35 HKD. Stored as HKD. No conversion needed.
+[2026-01-12 09:37:31] User: TSH, Shop: East Repair Inc., Total: 154.06 HKD, Date: 2019-02-11, Remarks: , Shared: No, OriginalAmount: 154.06, OriginalCurrency: USD, Conversion: Original: 154.06 USD. Stored as HKD. No conversion needed.
