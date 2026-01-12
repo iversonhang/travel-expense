@@ -1,0 +1,6 @@
+Flask
+google-genai
+Pillow
+python-dotenv
+# Supabase 函式庫
+supabase-py
