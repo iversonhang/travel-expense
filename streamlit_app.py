@@ -30,7 +30,7 @@ REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 # 貨幣轉換設定
-BASE_CURRENCY = "USD"
+BASE_CURRENCY = "JPY"
 TARGET_CURRENCIES = ["HKD", "JPY"]
 
 @st.cache_resource
