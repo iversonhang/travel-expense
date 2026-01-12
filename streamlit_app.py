@@ -4,7 +4,7 @@ import json
 import base64
 import re
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 from io import BytesIO
 
 # 外部依賴
@@ -13,7 +13,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 from github import Github
-from forex_python.converter import CurrencyRates # 匯率轉換
+from forex_python.converter import CurrencyRates 
 
 # --- 0. 環境變數設定與初始化 ---
 load_dotenv()
@@ -39,6 +39,7 @@ if 'edit_id' not in st.session_state:
     st.session_state.edit_id = None
 if 'delete_confirm_id' not in st.session_state:
     st.session_state.delete_confirm_id = None
+# 使用 Session State 緩存 DataFrame，減少 GitHub API 讀取次數
 if 'df_records' not in st.session_state:
     st.session_state.df_records = pd.DataFrame()
 
@@ -86,13 +87,16 @@ def convert_currency(amount, from_currency):
         return amount, from_currency, 0.0 
 
 
-# --- 3. 核心 Gemini 處理函數 (略) ---
+# --- 3. 核心 Gemini 處理函數 ---
 def analyze_receipt(uploaded_file):
+    """呼叫 Gemini API 進行收據 OCR 分析"""
     if not gemini_client: return None
-    # (OCR 邏輯與先前版本相同，這裡省略以節省篇幅，但程式碼中需包含完整的 analyze_receipt)
+        
     image = Image.open(uploaded_file)
+    
     prompt = ("Analyze the provided receipt image. Extract the vendor name, total amount, currency, and date "
             "in YYYY-MM-DD format. Strictly output the data in the required JSON format.")
+    
     try:
         response = gemini_client.models.generate_content(
             model='gemini-2.5-flash', contents=[prompt, image],
@@ -158,13 +162,12 @@ def write_to_github_file(record_data):
 
 # --- 5. 數據讀取和解析函數 (用於查看頁面) ---
 @st.cache_data(show_spinner=False)
-def read_and_parse_records_to_df(current_time):
+def read_and_parse_records_to_df(cache_buster):
     """從 GitHub 讀取 TXT 檔案並解析為 DataFrame"""
     content, _ = read_full_content()
     if not content: return pd.DataFrame()
 
     records = []
-    # 匹配 TXT 檔案中包含 Conversion 信息的結構
     pattern = re.compile(
         r'^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] '
         r'User: (?P<User>.*?), '
@@ -186,7 +189,6 @@ def read_and_parse_records_to_df(current_time):
     df = pd.DataFrame(records)
     if df.empty: return df
     
-    # 添加 ID 和排序
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
     df['Record_ID'] = df.index 
@@ -203,7 +205,8 @@ def execute_github_action(action, record_id_to_target, new_data=None):
         st.error("❌ 無法讀取 GitHub 檔案或 SHA 缺失。")
         return False
 
-    df = read_and_parse_records_to_df(datetime.now()) # 重新讀取最新的 DF
+    # 從 Session State 獲取 DataFrame (此時應為最新數據)
+    df = st.session_state.df_records
     
     if df.empty or record_id_to_target not in df['Record_ID'].values:
         st.error("❌ 找不到目標記錄。")
@@ -211,7 +214,7 @@ def execute_github_action(action, record_id_to_target, new_data=None):
 
     target_row = df[df['Record_ID'] == record_id_to_target].iloc[0]
     
-    # 標記要修改或刪除的原始行
+    # 標記要修改或刪除的原始行 (使用時間戳、用戶和金額來確保唯一性)
     target_line_start = f"[{target_row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}] User: {target_row['User']}"
     
     original_lines = full_content.strip().split('\n')
@@ -222,7 +225,7 @@ def execute_github_action(action, record_id_to_target, new_data=None):
             if action == 'delete':
                 continue # 跳過這行，實現刪除
             elif action == 'update' and new_data:
-                # 重新創建新的記錄行
+                # 重新創建新的記錄行 (注意：這裡使用當前的時間戳，而不是原來的，以避免未來衝突)
                 new_line = (
                     f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"User: {new_data['user_name']}, "
@@ -246,7 +249,7 @@ def execute_github_action(action, record_id_to_target, new_data=None):
         commit_msg = f"feat: {action.capitalize()} record ID {record_id_to_target}"
         
         repo.update_file(FILE_PATH, commit_msg, new_content, sha)
-        st.session_state.df_records = pd.DataFrame() # 清除緩存
+        st.session_state.df_records = pd.DataFrame() # 清除緩存以重新加載
         st.success(f"✅ {action.capitalize()} 操作成功完成！")
         return True
     except Exception as e:
@@ -282,8 +285,10 @@ def display_edit_form(record):
     current_amount = float(amount_parts[0])
     current_currency = amount_parts[-1]
     
-    # 假設記錄的日期是 YYYY-MM-DD 格式
-    current_date = datetime.strptime(record['Date'], '%Y-%m-%d').date()
+    try:
+        current_date = datetime.strptime(record['Date'], '%Y-%m-%d').date()
+    except:
+        current_date = date.today() # 處理日期格式錯誤
 
     with st.form(key=f"edit_form_{record['Record_ID']}"):
         edited_shop = st.text_input("商家名稱", value=record['Shop'])
@@ -304,7 +309,7 @@ def display_edit_form(record):
 
             # 2. 準備新數據
             updated_data = {
-                "user_name": record['User'], # 用戶名不允許編輯
+                "user_name": record['User'], 
                 "remarks": edited_remarks,
                 "shop_name": edited_shop,
                 "total_amount": converted_amount,
@@ -323,11 +328,10 @@ def display_edit_form(record):
             st.rerun()
 
 
-# --- 8. 頁面渲染函數 A：提交費用 (略) ---
+# --- 8. 頁面渲染函數 A：提交費用 ---
 
 def render_submission_page():
     """渲染費用提交頁面 (OCR/手動)"""
-    # (此函數內容與先前版本相同，用於提交和寫入 GitHub)
     st.title("💸 提交費用")
     st.markdown("---")
 
@@ -349,7 +353,11 @@ def render_submission_page():
         
         if submission_mode == "📸 圖片 OCR 分析":
             st.subheader("圖片上傳與 AI 分析")
-            uploaded_file = st.file_uploader("上傳收據圖片 (JPEG/PNG)", type=['jpg', 'jpeg', 'png'])
+            # 兼容大小寫，解決部分手機上傳問題
+            uploaded_file = st.file_uploader(
+                "上傳收據圖片 (JPEG/PNG)", 
+                type=['jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG']
+            )
 
         elif submission_mode == "✍️ 手動輸入":
             st.subheader("手動輸入費用細節")
@@ -437,10 +445,9 @@ def render_view_records_page():
     """渲染查看記錄頁面，包含編輯和刪除按鈕"""
     st.title("📚 歷史費用記錄")
     
-    # 只有當 session state 為空時才重新加載數據
+    # 重新加載數據，使用 cache_buster 確保在提交/編輯/刪除後刷新
     if st.session_state.df_records.empty:
         with st.spinner("從 GitHub 下載並解析數據中..."):
-            # 傳遞時間參數，強制 st.cache_data 重新運行 (當 write_to_github_file 被調用時)
             st.session_state.df_records = read_and_parse_records_to_df(datetime.now()) 
 
     df = st.session_state.df_records
@@ -456,10 +463,10 @@ def render_view_records_page():
     for index, row in df.iterrows():
         record_id = row['Record_ID']
         
-        # 使用 Columns 佈局：一列顯示數據，兩列顯示按鈕
+        # 佈局：數據 | 編輯按鈕 | 刪除按鈕
         col_data, col_edit, col_delete = st.columns([10, 1, 1])
 
-        # 顯示數據
+        # 顯示數據摘要
         record_summary = (
             f"**日期:** {row['Date']} | "
             f"**商家:** {row['Shop']} | "
