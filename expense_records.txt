@@ -1,3 +1,1 @@
-
 [2026-01-12 07:34:20] User: TSH, Shop: 7-11, Total: 2000.00 JPY, Date: 2026-01-12, Remarks: , Shared: No, Conversion: Original: 2000.0 JPY. 轉換失敗，使用原始值記錄。
-[2026-01-12 07:37:47] User: TWH, Shop: 7-11, Total: 3000.00 JPY, Date: 2026-01-12, Remarks: , Shared: No, OriginalCurrency: JPY, Conversion: Original: 3000.0 JPY. 轉換失敗，使用原始值記錄。
