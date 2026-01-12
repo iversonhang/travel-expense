@@ -30,7 +30,8 @@ EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY")
 REPO_NAME = "iversonhang/travel-expense" 
 FILE_PATH = "expense_records.txt"
 
-# 貨幣轉換設定
+# --- 用戶和貨幣配置 ---
+ALLOWED_USERS = ["TWH", "TSH", "Olivia"] # <--- 限定的用戶列表
 BASE_CURRENCY = "HKD" # 基礎儲存貨幣設定為 HKD
 TARGET_CURRENCIES = ["JPY"] # 只有 JPY 需要轉換為 HKD
 AVAILABLE_CURRENCIES = ["HKD", "JPY"] # 用於手動輸入和編輯表單
@@ -85,10 +86,9 @@ def convert_currency(amount, from_currency):
         return amount, BASE_CURRENCY, 1.0
 
     try:
-        # API 呼叫格式: /v6/{API_KEY}/pair/{FROM_CODE}/{TO_CODE}
         url = f"{API_BASE_URL}/{EXCHANGE_RATE_API_KEY}/pair/{from_currency}/{BASE_CURRENCY}"
         response = requests.get(url, timeout=5)
-        response.raise_for_status() # 對於 4xx/5xx 錯誤拋出異常
+        response.raise_for_status() 
         
         data = response.json()
         
@@ -192,6 +192,7 @@ def read_and_parse_records_to_df(cache_buster):
     if not content: return pd.DataFrame()
 
     records = []
+    
     # 匹配 TXT 檔案中包含 OriginalAmount 的結構
     pattern = re.compile(
         r'^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] '
@@ -201,7 +202,7 @@ def read_and_parse_records_to_df(cache_buster):
         r'Date: (?P<Date>\d{4}-\d{2}-\d{2}), '
         r'Remarks: (?P<Remarks>.*?), '
         r'Shared: (?P<Shared>.*?),\s*' 
-        r'OriginalAmount: (?P<OriginalAmount>.*?),\s*' # 匹配 OriginalAmount
+        r'OriginalAmount: (?P<OriginalAmount>.*?),\s*' 
         r'OriginalCurrency: (?P<OriginalCurrency>[A-Z]{3}?), \s*' 
         r'Conversion: (?P<Conversion>.*?)$',
         re.MULTILINE
@@ -211,11 +212,30 @@ def read_and_parse_records_to_df(cache_buster):
         match = pattern.match(line)
         if match:
             data = match.groupdict()
-            data['Amount Recorded'] = f"{data.pop('Total').strip()} {data.pop('Currency').strip()}"
-            records.append(data)
+            
+            # 從 Amount Recorded 中分離出 Total (HKD) 和 Currency (HKD)
+            total_amount_hkd = float(data['Total'].strip())
+            total_currency_hkd = data['Currency'].strip()
+            
+            records.append({
+                'timestamp': data['timestamp'],
+                'User': data['User'].strip(),
+                'Shop': data['Shop'].strip(),
+                'Amount Recorded': f"{total_amount_hkd:.2f} {total_currency_hkd}",
+                'Total_HKD_Value': total_amount_hkd, # <--- 新增欄位：用於計算總計
+                'Date': data['Date'],
+                'Remarks': data['Remarks'].strip(),
+                'Shared': data['Shared'].strip(),
+                'OriginalAmount': float(data['OriginalAmount'].strip()),
+                'OriginalCurrency': data['OriginalCurrency'].strip(),
+                'Conversion': data['Conversion'].strip()
+            })
     
     df = pd.DataFrame(records)
     if df.empty: return df
+    
+    # 確保用戶名只有在允許列表內 (將不在列表內的用戶歸類為 'Other')
+    df['User'] = df['User'].apply(lambda x: x if x in ALLOWED_USERS else 'Other') 
     
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
@@ -223,7 +243,7 @@ def read_and_parse_records_to_df(cache_buster):
     return df
 
 
-# --- 6. 刪除/更新 執行函數 ---
+# --- 6. 刪除/更新 執行函數 (保持不變) ---
 
 def execute_github_action(action, record_id_to_target, new_data=None):
     """執行刪除或更新操作，並寫回整個檔案"""
@@ -259,7 +279,7 @@ def execute_github_action(action, record_id_to_target, new_data=None):
                     f"Date: {new_data['transaction_date']}, "
                     f"Remarks: {new_data['remarks']}, "
                     f"Shared: {new_data.get('is_shared', 'No')}, " 
-                    f"OriginalAmount: {new_data.get('original_amount', 0.0):.2f}, " # 新增
+                    f"OriginalAmount: {new_data.get('original_amount', 0.0):.2f}, " 
                     f"OriginalCurrency: {new_data.get('original_currency', BASE_CURRENCY)}, " 
                     f"Conversion: {new_data.get('conversion_notes', 'Manually Edited')}\n"
                 )
@@ -285,7 +305,7 @@ def execute_github_action(action, record_id_to_target, new_data=None):
         return False
 
 
-# --- 7. 編輯和刪除 UI 輔助函數 ---
+# --- 7. 編輯和刪除 UI 輔助函數 (保持不變) ---
 
 def display_delete_confirmation(record):
     """顯示刪除確認框"""
@@ -322,8 +342,11 @@ def display_edit_form(record):
     
     current_original_amount = float(record.get('OriginalAmount', current_amount_hkd)) 
 
-
+    # 確保編輯時的用戶名選項是限定列表
+    current_user_index = ALLOWED_USERS.index(record['User']) if record['User'] in ALLOWED_USERS else 0 # 假設 TWH 是第一個
+    
     with st.form(key=f"edit_form_{record['Record_ID']}"):
+        edited_user = st.selectbox("誰支付了？", options=ALLOWED_USERS, index=current_user_index) # <--- 更新用戶列表
         edited_shop = st.text_input("商家名稱", value=record['Shop'])
         
         edited_original_amount = st.number_input(
@@ -355,7 +378,7 @@ def display_edit_form(record):
 
             # 2. 準備新數據
             updated_data = {
-                "user_name": record['User'], 
+                "user_name": edited_user, # <--- 使用編輯後的新用戶名
                 "remarks": edited_remarks,
                 "is_shared": "Yes" if edited_is_shared else "No", 
                 "original_currency": edited_currency,         
@@ -391,7 +414,8 @@ def render_submission_page():
 
     with st.form("expense_form"):
         st.subheader("基本信息")
-        user_name = st.selectbox("誰支付了？", options=['TWH', 'TSH', 'Olivia'])
+        # <--- 更新用戶選項
+        user_name = st.selectbox("誰支付了？", options=ALLOWED_USERS) 
         remarks = st.text_input("備註 (可選)", key="remarks_input")
         
         is_shared = st.checkbox("費用是否需要分攤 (Shared)?", value=False) 
@@ -453,8 +477,7 @@ def render_submission_page():
                 converted_amount = original_amount
                 final_currency = original_currency
                 
-                if original_currency in TARGET_CURRENCIES: # 如果是 JPY
-                    # 執行 JPY -> HKD 轉換
+                if original_currency in TARGET_CURRENCIES: 
                     converted_amount, final_currency, rate = convert_currency(original_amount, original_currency)
                     
                     if rate > 0.0:
@@ -498,7 +521,60 @@ def render_submission_page():
                      st.error("分析失敗，請檢查圖片或嘗試手動輸入。")
 
 
-# --- 9. 頁面渲染函數 B：查看記錄 ---
+# --- 9A. 費用總結計算和顯示函數 (新增) ---
+
+def calculate_and_display_summary(df):
+    """計算並顯示總支出和按用戶分類的支出"""
+    st.markdown("---")
+    st.subheader("📊 費用總結報告 (HKD)")
+    
+    # 確保 Total_HKD_Value 存在且為數值類型
+    if 'Total_HKD_Value' not in df.columns:
+        st.warning("無法計算總結：缺少 HKD 金額數據。")
+        return
+
+    # 總支出
+    total_expense = df['Total_HKD_Value'].sum()
+    
+    # 按用戶分組計算
+    user_summary = df.groupby('User')['Total_HKD_Value'].sum().reset_index()
+    
+    # 創建三列佈局
+    col_total, col_user_1, col_user_2, col_user_3 = st.columns([1, 1, 1, 1])
+
+    # 1. 顯示總支出
+    with col_total:
+        st.metric(
+            label=f"💰 **總支出 (所有用戶)**",
+            value=f"{total_expense:,.2f} {BASE_CURRENCY}"
+        )
+    
+    # 2. 顯示每個用戶的支出
+    columns = [col_user_1, col_user_2, col_user_3]
+    
+    for i, user in enumerate(ALLOWED_USERS):
+        if i < len(columns):
+            user_total = user_summary[user_summary['User'] == user]['Total_HKD_Value'].iloc[0] if user in user_summary['User'].values else 0.0
+            
+            # 使用 Emoji 區分用戶
+            if user == "TWH":
+                icon = "👨‍💻"
+            elif user == "TSH":
+                icon = "💼"
+            elif user == "Olivia":
+                icon = "👩‍🎨"
+            else:
+                icon = "👤"
+
+            with columns[i]:
+                st.metric(
+                    label=f"{icon} **{user} 支出**",
+                    value=f"{user_total:,.2f} {BASE_CURRENCY}"
+                )
+
+    st.markdown("---")
+    
+# --- 9B. 頁面渲染函數 B：查看記錄 (更新: 呼叫總結函數) ---
 
 def render_view_records_page():
     """渲染查看記錄頁面，包含編輯和刪除按鈕"""
@@ -506,6 +582,7 @@ def render_view_records_page():
     
     if st.session_state.df_records.empty:
         with st.spinner("從 GitHub 下載並解析數據中..."):
+            # 傳遞一個會變化的值 (時間) 確保在必要時重新加載
             st.session_state.df_records = read_and_parse_records_to_df(datetime.now()) 
 
     df = st.session_state.df_records
@@ -514,6 +591,10 @@ def render_view_records_page():
         st.warning("當前檔案中沒有可解析的費用記錄。")
         return
 
+    # --- 呼叫新的總結函數 ---
+    calculate_and_display_summary(df) 
+    # -----------------------
+
     st.subheader(f"找到 {len(df)} 條記錄")
     st.markdown("---")
 
@@ -521,13 +602,10 @@ def render_view_records_page():
     for index, row in df.iterrows():
         record_id = row['Record_ID']
         
-        # 保持列的比例不變，但由於頁面已是 wide，數據列會佔據大部分寬度
         col_data, col_edit, col_delete = st.columns([10, 1, 1])
 
-        # 顯示數據摘要 
         shared_icon = "👥" if row['Shared'].upper() == 'YES' else "👤"
         
-        # 顯示最終金額 (HKD) 和原始幣種
         if row['OriginalCurrency'] != BASE_CURRENCY:
             original_curr_display = (
                 f" (原: {float(row['OriginalAmount']):.2f} {row['OriginalCurrency']})" 
@@ -567,7 +645,7 @@ def render_view_records_page():
             display_delete_confirmation(row)
 
 
-# --- 10. 應用程式主運行流程 ---
+# --- 10. 應用程式主運行流程 (保持不變) ---
 
 st.sidebar.title("導航")
 page = st.sidebar.radio(
