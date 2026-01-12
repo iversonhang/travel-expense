@@ -1,8 +1,13 @@
 # 在 streamlit_app.py 中
 
-from github import Github
-import base64
-from datetime import datetime
+import streamlit as st
+import os  # <--- 請確保加上這一行！
+import json
+from google import genai
+from google.genai import types
+from PIL import Image
+from io import BytesIO
+from dotenv import load_dotenv
 
 # --- 環境變數 ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
