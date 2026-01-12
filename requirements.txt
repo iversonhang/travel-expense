@@ -1,7 +1,10 @@
 streamlit
 google-genai
 Pillow
-#supabase-py
-streamlit
-# ... 其他 Streamlit/Gemini 依賴 ...
-pygithub  # GitHub API Python 函式庫
+python-dotenv  # <-- 確保這一行存在且拼寫正確
+# 根據您的選擇：
+# 如果您使用 MongoDB：
+# pymongo
+# dnspython
+# 如果您使用 GitHub API：
+# pygithub
