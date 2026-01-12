@@ -1,7 +1,8 @@
 streamlit
 google-genai
-Pillow
 python-dotenv
-PyGithub
+Pillow
+requests
 pandas
-requests # 用于呼叫 ExchangeRate-API
+PyGithub
+PyMuPDF
