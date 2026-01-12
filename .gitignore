@@ -1,0 +1,24 @@
+# .gitignore
+
+# 1. 虛擬環境 (Python Virtual Environment)
+# 確保您的虛擬環境資料夾不會被提交
+venv/
+.venv/
+
+# 2. 應用程式產生的暫存文件
+__pycache__/
+*.pyc
+
+# 3. Streamlit 產生的本地文件
+# Streamlit 在本地運行時可能會創建這個資料夾
+.streamlit/
+temp.py
+
+# 4. 機密資訊和環境變數 (絕對重要！)
+# 您的 API Key 和資料庫密碼儲存在這裡，絕不能上傳！
+.env
+secrets.toml  # Streamlit Cloud 通常使用這個檔案來儲存 Secrets
+
+# 5. 作業系統和編輯器文件
+.DS_Store      # macOS 暫存文件
+*~             # Linux/Unix 編輯器暫存
