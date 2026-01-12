@@ -1,7 +1,7 @@
 streamlit
 google-genai
 Pillow
-pygithub
 python-dotenv
+PyGithub
 pandas
-forex-python  # <--- 新增這一行
+requests # 用于呼叫 ExchangeRate-API
