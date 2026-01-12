@@ -1,6 +1,5 @@
 streamlit
 google-genai
 Pillow
-python-dotenv
-# Supabase 函式庫
 supabase-py
+streamlit==1.30.0
