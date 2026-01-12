@@ -1,61 +1,68 @@
-import os
-import json
-from flask import Flask, request, jsonify
-from google import genai
-from google.genai import types
-from io import BytesIO
-from dotenv import load_dotenv
-from supabase import create_client, Client
+# 在 streamlit_app.py 中
 
-load_dotenv()
-app = Flask(__name__)
+from github import Github
+import base64
+from datetime import datetime
 
-# --- 環境變數設定 (從 .env 讀取) ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# --- 環境變數 ---
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+REPO_NAME = "YOUR_USERNAME/YOUR_REPO_NAME" # 例如: "myuser/TravelExpenseStreamlit"
+FILE_PATH = "expense_records.txt"
 
-# 初始化客戶端
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+def write_to_github_file(new_record_text):
+    if not GITHUB_TOKEN:
+        st.error("GitHub Token 缺失，無法寫入檔案。")
+        return False
 
-# --- Gemini 輸出結構 ---
-RECEIPT_SCHEMA = types.Schema(...) # 結構與前次提供的相同，請自行複製貼上
-
-@app.route('/analyze-receipt', methods=['POST'])
-def analyze_receipt():
-    # ... (接收檔案和 User/Remarks 的邏輯與前次相同，請自行複製貼上) ...
-    
-    # 呼叫 Gemini API (與前次提供的邏輯相同)
     try:
-        response = gemini_client.models.generate_content(
-            # ... (Gemini 呼叫配置) ...
-        )
-        ocr_data = json.loads(response.text)
+        g = Github(GITHUB_TOKEN)
+        repo = g.get_repo(REPO_NAME)
         
-        # --- 數據庫寫入 ---
-        if not supabase:
-            return jsonify({"error": "Database connection not established"}), 500
-
-        data_to_insert = {
-            "user_name": request.form.get('user', 'Unknown'),
-            "remarks": request.form.get('remarks', ''),
-            "shop_name": ocr_data.get("shop_name"),
-            "total_amount": ocr_data.get("total_amount"),
-            "currency": ocr_data.get("currency"),
-            "transaction_date": ocr_data.get("transaction_date") 
-        }
-
-        # 寫入 Supabase
-        data, count = supabase.table('expenses').insert(data_to_insert).execute()
-
-        return jsonify({
-            "message": "Record saved successfully", 
-            "db_record": data[1][0] # 獲取返回的數據
-        }), 200
+        # 1. 讀取現有內容
+        try:
+            contents = repo.get_contents(FILE_PATH)
+            # 解碼現有內容
+            existing_content = base64.b64decode(contents.content).decode('utf-8')
+        except Exception:
+            # 如果檔案不存在，則從空字串開始
+            existing_content = ""
+            contents = None
+            
+        # 2. 組合新內容
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_line = f"[{timestamp}] {new_record_text}\n"
+        updated_content = existing_content + new_line
+        
+        # 3. 提交更新到 GitHub
+        if contents:
+            # 更新現有檔案
+            repo.update_file(
+                FILE_PATH,
+                f"feat: Add new expense record for {timestamp}",
+                updated_content,
+                contents.sha
+            )
+        else:
+            # 創建新檔案
+            repo.create_file(
+                FILE_PATH,
+                f"feat: Initial expense record file created",
+                updated_content
+            )
+        
+        st.success(f"數據已成功寫入 GitHub 檔案：{FILE_PATH}")
+        return True
 
     except Exception as e:
-        return jsonify({"error": f"Processing failed: {e}"}), 500
+        st.error(f"寫入 GitHub 失敗 (請檢查 Token 權限)：{e}")
+        return False
 
-if __name__ == '__main__':
-    app.run(port=5000)
+# --- 在主應用程式提交邏輯中呼叫 ---
+if submitted and uploaded_file is not None:
+    # ... (OCR 分析完成後) ...
+    if ocr_data:
+        # 將數據轉換為 TXT 格式
+        record_text = f"User: {user_name}, Shop: {ocr_data['shop_name']}, Total: {ocr_data['total_amount']} {ocr_data['currency']}, Remarks: {remarks}"
+        
+        # 寫入 GitHub
+        write_to_github_file(record_text)
