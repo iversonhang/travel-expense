@@ -17,7 +17,7 @@ import fitz
 
 # --- 0. 環境變數與初始化 ---
 load_dotenv()
-st.set_page_config(page_title="AI 費用分帳系統", layout="wide") 
+st.set_page_config(page_title="AI 雙幣分帳系統", layout="wide") 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -43,7 +43,7 @@ def init_gemini_client():
 
 gemini_client = init_gemini_client()
 
-# --- 1. 輔助功能 (匯率/PDF) ---
+# --- 1. 核心輔助功能 ---
 
 @st.cache_data(ttl=3600)
 def get_live_exchange_rate(from_curr, to_curr):
@@ -68,7 +68,7 @@ def pdf_to_images(uploaded_file):
     doc.close()
     return img
 
-# --- 2. GitHub 核心操作 ---
+# --- 2. GitHub 檔案操作 ---
 
 def read_full_content():
     if not GITHUB_TOKEN: return None, None
@@ -97,7 +97,7 @@ def execute_github_action(action, record_id, new_data=None):
     target = df[df['Record_ID'] == record_id].iloc[0]
     target_start = f"[{target['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}] User: {target['User']}"
     
-    lines = full_content.strip().split('\n')
+    lines = (full_content or "").strip().split('\n')
     new_lines = []
     for l in lines:
         if l.startswith(target_start):
@@ -115,13 +115,12 @@ def execute_github_action(action, record_id, new_data=None):
     st.session_state.df_records = pd.DataFrame()
     return True
 
-# --- 3. 數據解析與分帳邏輯 ---
+# --- 3. 數據處理與雙幣渲染 ---
 
 def read_and_parse_records_to_df():
     content, _ = read_full_content()
     if not content: return pd.DataFrame()
     records = []
-    # 正則表達式解析每一行
     pattern = re.compile(r'^\[(?P<ts>.*?)\] User: (?P<u>.*?), Shop: (?P<s>.*?), Total: (?P<t>.*?)\s*(?P<c>[A-Z]{3}), Date: (?P<d>.*?), Remarks: (?P<r>.*?), Shared: (?P<sh>.*?), OriginalAmount: (?P<oa>.*?), OriginalCurrency: (?P<oc>.*?), Conversion: (?P<cv>.*?)$', re.MULTILINE)
     for line in content.strip().split('\n'):
         m = pattern.match(line)
@@ -129,161 +128,154 @@ def read_and_parse_records_to_df():
             d = m.groupdict()
             records.append({
                 'timestamp': pd.to_datetime(d['ts']), 'User': d['u'], 'Shop': d['s'], 
-                'Amount Recorded': f"{d['t']} {d['c']}", 'Total_HKD_Value': float(d['t']), 
-                'Date': d['d'], 'Remarks': d['r'], 'Shared': d['sh'].strip().capitalize(), 
-                'OriginalAmount': float(d['oa']), 'OriginalCurrency': d['oc']
+                'Total_HKD_Value': float(d['t']), 'Date': d['d'], 'Remarks': d['r'], 
+                'Shared': d['sh'].strip().capitalize(), 'OriginalAmount': float(d['oa']), 
+                'OriginalCurrency': d['oc'].strip()
             })
     df = pd.DataFrame(records).sort_values('timestamp', ascending=False).reset_index(drop=True)
     df['Record_ID'] = df.index
     return df
 
-def calculate_and_display_summary(df):
-    """計算兩人支出與分帳結算"""
-    st.subheader("📊 財務概覽 (HKD)")
-    
-    # 1. 總支出統計
-    total_val = df['Total_HKD_Value'].sum()
-    user_sum = df.groupby('User')['Total_HKD_Value'].sum().to_dict()
-
-    col_total, col_twh, col_tsh = st.columns([1, 1, 1])
-    col_total.metric("💰 累計總支出", f"{total_val:,.2f}")
-    col_twh.metric("👨‍💻 TWH 總支出", f"{user_sum.get('TWH', 0):,.2f}")
-    col_tsh.metric("💼 TSH 總支出", f"{user_sum.get('TSH', 0):,.2f}")
-
-    st.markdown("---")
-    
-    # 2. 結算邏輯 (分帳核心)
-    st.subheader("🤝 兩人結算 (僅限 Shared 項目)")
-    
-    shared_df = df[df['Shared'] == 'Yes']
-    if shared_df.empty:
-        st.info("目前沒有需要分攤 (Shared) 的費用項目。")
-    else:
-        # TWH 墊付的共有金額
-        twh_shared_paid = shared_df[shared_df['User'] == 'TWH']['Total_HKD_Value'].sum()
-        # TSH 墊付的共有金額
-        tsh_shared_paid = shared_df[shared_df['User'] == 'TSH']['Total_HKD_Value'].sum()
-        
-        total_shared = twh_shared_paid + tsh_shared_paid
-        fair_share = total_shared / 2 # 每人應付一半
-        
-        c1, c2, c3 = st.columns(3)
-        c1.write(f"**共有費用總計:** {total_shared:,.2f} HKD")
-        c2.write(f"**每人應負擔:** {fair_share:,.2f} HKD")
-        
-        # 結算結果
-        # 如果 TWH 付的比應負擔的多，說明 TSH 欠 TWH
-        balance = twh_shared_paid - fair_share
-        
-        with c3:
-            if balance > 0:
-                st.success(f"👉 **TSH 應支付給 TWH: {abs(balance):,.2f} HKD**")
-            elif balance < 0:
-                st.warning(f"👉 **TWH 應支付給 TSH: {abs(balance):,.2f} HKD**")
-            else:
-                st.write("✅ 雙方金額已平衡，無需支付。")
-
-    st.markdown("---")
-
-# --- 4. 頁面渲染 ---
-
 def render_view_records_page():
-    st.title("📚 歷史費用與結算")
+    st.title("📚 歷史費用 (HKD / JPY)")
+    
+    # 獲取最新匯率用於反向換算
+    rate_jpy_hkd = get_live_exchange_rate("JPY", "HKD")
+    
     if st.session_state.df_records.empty:
         st.session_state.df_records = read_and_parse_records_to_df()
     
     df = st.session_state.df_records
     if df.empty:
-        st.info("尚未發現任何記錄。")
+        st.info("尚無記錄。")
         return
 
-    calculate_and_display_summary(df)
+    # --- 頂部總結儀表板 ---
+    total_hkd = df['Total_HKD_Value'].sum()
+    user_sum = df.groupby('User')['Total_HKD_Value'].sum().to_dict()
+    
+    c_tot, c_twh, c_tsh = st.columns(3)
+    c_tot.metric("💰 總支出 (HKD)", f"${total_hkd:,.2f}")
+    c_twh.metric("👨‍💻 TWH (HKD)", f"${user_sum.get('TWH', 0):,.2f}")
+    c_tsh.metric("💼 TSH (HKD)", f"${user_sum.get('TSH', 0):,.2f}")
 
-    st.subheader("📝 詳細流水帳")
+    # --- 兩人分帳結算 ---
+    shared_df = df[df['Shared'] == 'Yes']
+    if not shared_df.empty:
+        twh_shared = shared_df[shared_df['User'] == 'TWH']['Total_HKD_Value'].sum()
+        tsh_shared = shared_df[shared_df['User'] == 'TSH']['Total_HKD_Value'].sum()
+        balance = twh_shared - (twh_shared + tsh_shared) / 2
+        
+        st.markdown("---")
+        if balance > 0:
+            st.success(f"🤝 **結算提示：TSH 應支付給 TWH {abs(balance):,.2f} HKD**")
+        elif balance < 0:
+            st.warning(f"🤝 **結算提示：TWH 應支付給 TSH {abs(balance):,.2f} HKD**")
+        else:
+            st.info("🤝 雙方共有費用已平帳。")
+    
+    st.markdown("---")
+    st.subheader("📝 詳細清單")
+
+    # --- 雙幣流水帳顯示 ---
     for i, row in df.iterrows():
         rid = row['Record_ID']
-        shared_label = "👥 共有" if row['Shared'] == 'Yes' else "🔒 私有"
-        c1, c2, c3 = st.columns([8, 1, 1])
-        with c1:
-            st.markdown(f"**{row['Date']}** | **{row['Shop']}** | `{row['Amount Recorded']}` ({row['User']}) | {shared_label}")
-            if row['Remarks']: st.caption(f"💬 {row['Remarks']}")
-        with c2:
-            if st.button("✏️", key=f"ed_{rid}"): st.session_state.edit_id = rid
-        with c3:
-            if st.button("🗑️", key=f"de_{rid}"): st.session_state.delete_confirm_id = rid
+        
+        # 計算雙幣數值
+        val_hkd = row['Total_HKD_Value']
+        if row['OriginalCurrency'] == 'JPY':
+            val_jpy = row['OriginalAmount']
+        else:
+            # 如果原始是 HKD，且有匯率，則算出日幣參考
+            val_jpy = val_hkd / rate_jpy_hkd if rate_jpy_hkd else 0
 
+        c1, c2, c3 = st.columns([8, 1, 1])
+        
+        with c1:
+            # 強調顯示雙幣
+            st.markdown(
+                f"**{row['Date']}** | **{row['Shop']}** | `{row['User']}` "
+                f"<span style='color:#007bff; font-weight:bold; font-size:1.1em;'> {val_hkd:,.2f} HKD </span> "
+                f"<span style='color:#6c757d;'> (¥{val_jpy:,.0f} JPY) </span>", 
+                unsafe_allow_html=True
+            )
+            
+            # 顯示備註與標籤
+            tags = f" {'👥 共有' if row['Shared'] == 'Yes' else '🔒 私有'}"
+            if row['Remarks']:
+                st.caption(f"💬 {row['Remarks']} | {tags}")
+            else:
+                st.caption(tags)
+        
+        with c2:
+            if st.button("✏️", key=f"e_{rid}"): st.session_state.edit_id = rid
+        with c3:
+            if st.button("🗑️", key=f"d_{rid}"): st.session_state.delete_confirm_id = rid
+
+        # 編輯與刪除邏輯 (略，與之前相同)
         if st.session_state.edit_id == rid:
-            with st.form(f"f_ed_{rid}"):
+            with st.form(f"form_ed_{rid}"):
                 u = st.selectbox("付款人", ALLOWED_USERS, index=ALLOWED_USERS.index(row['User']))
                 s = st.text_input("商家", value=row['Shop'])
-                oa = st.number_input("金額", value=row['OriginalAmount'])
-                sh = st.checkbox("費用需分攤？", value=row['Shared'] == 'Yes')
-                if st.form_submit_button("保存"):
-                    amt, curr, rate = convert_currency(oa, row['OriginalCurrency'])
-                    nd = {"user_name": u, "shop_name": s, "total_amount": amt, "currency": curr, "transaction_date": row['Date'], "remarks": row['Remarks'], "is_shared": "Yes" if sh else "No", "original_amount": oa, "original_currency": row['OriginalCurrency'], "conversion_notes": f"Updated. Rate: {rate}"}
+                oa = st.number_input("原始金額", value=row['OriginalAmount'])
+                oc = st.selectbox("貨幣", AVAILABLE_CURRENCIES, index=AVAILABLE_CURRENCIES.index(row['OriginalCurrency']))
+                sh = st.checkbox("需分攤", value=row['Shared'] == 'Yes')
+                if st.form_submit_button("更新"):
+                    amt, curr, rate = convert_currency(oa, oc)
+                    nd = {"user_name": u, "shop_name": s, "total_amount": amt, "currency": curr, "transaction_date": row['Date'], "remarks": row['Remarks'], "is_shared": "Yes" if sh else "No", "original_amount": oa, "original_currency": oc, "conversion_notes": f"Rate: {rate}"}
                     execute_github_action('update', rid, nd)
                     st.rerun()
 
         if st.session_state.delete_confirm_id == rid:
-            if st.button("❌ 確認刪除", key=f"cf_{rid}", type="primary"):
+            if st.button("確認刪除", key=f"conf_{rid}", type="primary"):
                 execute_github_action('delete', rid)
                 st.session_state.delete_confirm_id = None
                 st.rerun()
-        st.markdown("<hr style='margin:0; border-top:1px solid #f0f2f6'>", unsafe_allow_html=True)
+        
+        st.markdown("<hr style='margin:0.5em 0; border-top:1px solid #eee'>", unsafe_allow_html=True)
 
+# (其餘 render_submission_page 與 main 保持不變，但確保使用 gemini-2.5-flash-lite)
 def render_submission_page():
     st.title("💸 提交費用")
     mode = st.radio("模式", ["📸 圖片/PDF OCR", "✍️ 手動輸入"])
-    with st.form("sub_form"):
+    with st.form("sub"):
         user = st.selectbox("付款人", ALLOWED_USERS)
-        remarks = st.text_input("備註")
-        shared = st.checkbox("費用是否需要兩人分攤 (Shared)?", value=True)
+        rem = st.text_input("備註")
+        sh = st.checkbox("需分攤？", value=True)
         ocr_data = None
-        
         if mode == "📸 圖片/PDF OCR":
             up = st.file_uploader("上傳收據", type=['jpg','png','pdf'])
         else:
-            s_n = st.text_input("商家名稱")
+            s_n = st.text_input("商家")
             a_n = st.number_input("金額", min_value=0.0)
             c_n = st.selectbox("幣種", AVAILABLE_CURRENCIES)
             d_n = st.date_input("日期")
 
-        if st.form_submit_button("提交並記錄"):
+        if st.form_submit_button("記錄"):
             if mode == "📸 圖片/PDF OCR" and up:
                 with st.spinner("Gemini Lite 分析中..."):
                     img = pdf_to_images(up) if up.type=="application/pdf" else Image.open(up)
                     prompt = "Analyze receipt: vendor, total amount, currency, date (YYYY-MM-DD). Output JSON."
-                    try:
-                        res = gemini_client.models.generate_content(
-                            model='gemini-2.5-flash-lite', 
-                            contents=[prompt, img],
-                            config=types.GenerateContentConfig(response_mime_type="application/json")
-                        )
-                        ocr_data = json.loads(res.text)
-                    except: st.error("AI 分析失敗")
-            elif mode == "✍️ 手動輸入":
+                    res = gemini_client.models.generate_content(
+                        model='gemini-2.5-flash-lite', contents=[prompt, img],
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
+                    ocr_data = json.loads(res.text)
+            else:
                 ocr_data = {"shop_name": s_n, "total_amount": a_n, "currency": c_n, "transaction_date": str(d_n)}
             
             if ocr_data:
                 amt, curr, rate = convert_currency(ocr_data['total_amount'], ocr_data['currency'])
-                final = {"user_name": user, "shop_name": ocr_data['shop_name'], "total_amount": amt, "currency": curr, "transaction_date": ocr_data['transaction_date'], "remarks": remarks, "is_shared": "Yes" if shared else "No", "original_amount": ocr_data['total_amount'], "original_currency": ocr_data['currency'], "conversion_notes": f"Rate: {rate}"}
-                write_to_github_file(final)
-                st.success(f"✅ 記錄成功！已{'列入分帳' if shared else '計入私有支出'}。")
-
-# --- 5. 主程序 ---
+                write_to_github_file({"user_name": user, "shop_name": ocr_data['shop_name'], "total_amount": amt, "currency": curr, "transaction_date": ocr_data['transaction_date'], "remarks": rem, "is_shared": "Yes" if sh else "No", "original_amount": ocr_data['total_amount'], "original_currency": ocr_data['currency'], "conversion_notes": f"Rate: {rate}"})
+                st.success("成功記錄")
 
 def main():
     st.sidebar.title("🧭 系統導航")
     page = st.sidebar.radio("切換頁面", ["提交費用", "歷史記錄"])
-    
     st.sidebar.markdown("---")
     st.sidebar.subheader("💱 即時匯率")
     rate = get_live_exchange_rate("JPY", "HKD")
-    if rate:
-        st.sidebar.metric("1 JPY 兌 HKD", f"{rate:.4f}")
-    
-    st.sidebar.caption("⚡ Powered by Gemini Lite")
-    
+    if rate: st.sidebar.metric("1 JPY 兌 HKD", f"{rate:.4f}")
     if page == "提交費用": render_submission_page()
     else: render_view_records_page()
 
