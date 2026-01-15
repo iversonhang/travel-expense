@@ -27,7 +27,7 @@ REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 ALLOWED_USERS = ["TWH", "TSH"] 
-BASE_CURRENCY = "JPY" 
+BASE_CURRENCY = "HKD" 
 AVAILABLE_CURRENCIES = ["HKD", "JPY"] 
 API_BASE_URL = "https://v6.exchangerate-api.com/v6" 
 
