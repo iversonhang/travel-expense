@@ -13,9 +13,9 @@ from PIL import Image
 from github import Github
 import fitz 
 
-# --- 0. Initial Configuration ---
+# --- 0. 初始化 ---
 load_dotenv()
-st.set_page_config(page_title="AI Proportional Splitter v3", layout="wide") 
+st.set_page_config(page_title="AI 比例分帳系統", layout="wide") 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -29,118 +29,15 @@ AVAILABLE_CURRENCIES = ["HKD", "JPY"]
 
 @st.cache_resource
 def init_gemini_client():
-    if not GEMINI_API_KEY: return None
     try: return genai.Client(api_key=GEMINI_API_KEY)
     except: return None
 
 gemini_client = init_gemini_client()
 
-# --- 1. GitHub Data Sync Logic ---
+# --- 1. 核心計算函數 ---
 
-def save_df_to_github(df):
-    """Converts a DataFrame back into the custom log format and uploads to GitHub."""
-    repo = Github(GITHUB_TOKEN).get_repo(REPO_NAME)
-    try:
-        file = repo.get_contents(FILE_PATH)
-        sha = file.sha
-    except: sha = None
-
-    lines = []
-    for _, r in df.iterrows():
-        # Match the exact format we use for parsing
-        line = (f"[{r['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}] User: {r['User']}, Shop: {r['Shop']}, "
-                f"Total: {r['Total_HKD']:.2f} HKD, Date: {r['Date']}, "
-                f"Shared: {r['Shared']}, TWH_n: {r['TWH_n']}, TSH_n: {r['TSH_n']}, "
-                f"Orig: {r['Original']}, Rem: {r['Remarks']}\n")
-        lines.append(line)
-    
-    new_content = "".join(lines)
-    if sha:
-        repo.update_file(FILE_PATH, "Update/Delete records via UI", new_content, sha)
-    else:
-        repo.create_file(FILE_PATH, "Init records via UI", new_content)
-    st.success("✨ GitHub records synchronized successfully!")
-
-def read_and_parse_records_to_df():
-    try:
-        repo = Github(GITHUB_TOKEN).get_repo(REPO_NAME)
-        content = base64.b64decode(repo.get_contents(FILE_PATH).content).decode('utf-8')
-    except: return pd.DataFrame()
-    
-    records = []
-    pattern = re.compile(r'^\[(?P<ts>.*?)\] User: (?P<u>.*?), Shop: (?P<s>.*?), Total: (?P<t>.*?) HKD, Date: (?P<d>.*?), Shared: (?P<sh>.*?), TWH_n: (?P<tn>\d+), TSH_n: (?P<sn>\d+), Orig: (?P<oa>.*?) (?P<oc>.*?), Rem: (?P<r>.*?)$', re.MULTILINE)
-    
-    for m in pattern.finditer(content):
-        d = m.groupdict()
-        records.append({
-            'timestamp': pd.to_datetime(d['ts']), 
-            'User': d['u'], 
-            'Shop': d['s'], 
-            'Total_HKD': float(d['t']), 
-            'Date': d['d'], 
-            'Shared': d['sh'].strip(),
-            'TWH_n': int(d['tn']), 
-            'TSH_n': int(d['sn']),
-            'Original': f"{d['oa']} {d['oc']}", 
-            'Remarks': d['r']
-        })
-    return pd.DataFrame(records)
-
-# --- 2. Page Rendering: History (Edit/Delete) ---
-
-def render_history_page():
-    st.title("📚 Detailed Logs (Edit/Delete)")
-    df = read_and_parse_records_to_df()
-    
-    if df.empty:
-        st.info("No records found.")
-        return
-
-    # 1. Settlement Logic
-    shared_df = df[df['Shared'] == 'Yes'].copy()
-    if not shared_df.empty:
-        shared_df['TWH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TWH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
-        twh_paid = shared_df[shared_df['User'] == 'TWH']['Total_HKD'].sum()
-        twh_should = shared_df['TWH_Owe'].sum()
-        balance = twh_paid - twh_should
-
-        st.subheader("🤝 Current Balance")
-        if balance > 0: st.success(f"**TSH owes TWH: {abs(balance):,.1f} HKD**")
-        elif balance < 0: st.warning(f"**TWH owes TSH: {abs(balance):,.1f} HKD**")
-        else: st.info("Everything is settled!")
-
-    st.markdown("---")
-    
-    # 2. Interactive Data Editor
-    st.subheader("📝 Edit or Remove Records")
-    st.caption("Instructions: Double-click cells to edit. Select a row and press 'Backspace' to delete. Click 'Save Changes' to update GitHub.")
-
-    # Configure the columns for a better UI
-    edited_df = st.data_editor(
-        df,
-        column_config={
-            "timestamp": None,  # Hide internal timestamp
-            "User": st.column_config.SelectboxColumn("Payer", options=ALLOWED_USERS, required=True),
-            "Shared": st.column_config.SelectboxColumn("Split?", options=["Yes", "No"], required=True),
-            "Total_HKD": st.column_config.NumberColumn("Amount (HKD)", format="%.2f"),
-            "TWH_n": st.column_config.NumberColumn("TWH Count", min_value=0),
-            "TSH_n": st.column_config.NumberColumn("TSH Count", min_value=0),
-        },
-        num_rows="dynamic", # Allows adding/deleting rows
-        use_container_width=True,
-        key="history_editor"
-    )
-
-    if st.button("💾 Save Changes to GitHub", type="primary"):
-        with st.spinner("Syncing..."):
-            save_df_to_github(edited_df)
-            st.rerun()
-
-# --- (Other Functions: render_submission_page, main remain largely the same) ---
-# ... [Keeping the previous helper functions for currency, pdf, and main()]
-
+@st.cache_data(ttl=3600)
 def get_live_exchange_rate(from_curr, to_curr):
-    if not EXCHANGE_RATE_API_KEY: return None
     try:
         url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/pair/{from_curr}/{to_curr}"
         res = requests.get(url, timeout=5).json()
@@ -148,9 +45,11 @@ def get_live_exchange_rate(from_curr, to_curr):
     except: return None
 
 def convert_currency(amount, from_currency):
-    if from_currency == BASE_CURRENCY: return float(amount), 1.0
+    if from_currency == BASE_CURRENCY: return amount, 1.0
     rate = get_live_exchange_rate(from_currency, BASE_CURRENCY)
-    return (float(amount * rate), float(rate)) if rate else (float(amount), 0.0)
+    return (float(amount * rate), float(rate)) if rate else (amount, 0.0)
+
+# --- 2. GitHub 讀寫 (新增人數欄位支援) ---
 
 def write_to_github_file(data):
     repo = Github(GITHUB_TOKEN).get_repo(REPO_NAME)
@@ -159,40 +58,151 @@ def write_to_github_file(data):
         content = base64.b64decode(file.content).decode('utf-8')
         sha = file.sha
     except: content, sha = "", None
+
     line = (f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] User: {data['user_name']}, Shop: {data['shop_name']}, "
             f"Total: {data['total_amount']:.2f} HKD, Date: {data['transaction_date']}, "
-            f"Shared: {data['is_shared']}, TWH_n: {data['twh_n']}, TSH_n: {data['tsh_n']}, "
+            f"Shared: {data['is_shared']}, TWH_n: {data['twh_n']}, TSH_n: {data['tsh_n']}, " # 存儲人數
             f"Orig: {data['orig_amt']:.2f} {data['orig_curr']}, Rem: {data['remarks']}\n")
+    
     new_content = content + line
-    if sha: repo.update_file(FILE_PATH, "Add record", new_content, sha)
-    else: repo.create_file(FILE_PATH, "Init", new_content)
+    if sha: repo.update_file(FILE_PATH, "add record", new_content, sha)
+    else: repo.create_file(FILE_PATH, "create file", new_content)
+    st.session_state.df_records = pd.DataFrame()
 
-def render_submission_page(def_twh, def_tsh):
-    st.title("💸 New Expense")
-    mode = st.radio("Input", ["📸 AI OCR", "✍️ Manual"], horizontal=True)
-    with st.form("sub"):
-        user = st.selectbox("Payer", ALLOWED_USERS)
+# --- 3. 數據解析與按比例結算 ---
+
+def read_and_parse_records_to_df():
+    try:
+        repo = Github(GITHUB_TOKEN).get_repo(REPO_NAME)
+        content = base64.b64decode(repo.get_contents(FILE_PATH).content).decode('utf-8')
+    except: return pd.DataFrame()
+    
+    records = []
+    # 更新正則表達式以匹配人數 TWH_n 和 TSH_n
+    pattern = re.compile(r'^\[(?P<ts>.*?)\] User: (?P<u>.*?), Shop: (?P<s>.*?), Total: (?P<t>.*?) HKD, Date: (?P<d>.*?), Shared: (?P<sh>.*?), TWH_n: (?P<tn>\d+), TSH_n: (?P<sn>\d+), Orig: (?P<oa>.*?) (?P<oc>.*?), Rem: (?P<r>.*?)$', re.MULTILINE)
+    for m in pattern.finditer(content):
+        d = m.groupdict()
+        records.append({
+            'timestamp': pd.to_datetime(d['ts']), 'User': d['u'], 'Shop': d['s'], 
+            'Total_HKD': float(d['t']), 'Date': d['d'], 'Shared': d['sh'],
+            'TWH_n': int(d['tn']), 'TSH_n': int(d['sn']),
+            'Original': f"{d['oa']} {d['oc']}", 'Remarks': d['r']
+        })
+    df = pd.DataFrame(records).sort_values('timestamp', ascending=False).reset_index(drop=True)
+    df['Record_ID'] = df.index
+    return df
+
+def display_settlement(df):
+    st.subheader("🤝 比例分帳工具箱 (Proportional Settlement)")
+    
+    shared_df = df[df['Shared'] == 'Yes'].copy()
+    if shared_df.empty:
+        st.info("尚無分攤記錄。")
+        return
+
+    # 計算每筆記錄中各方應付的比例金額
+    shared_df['TWH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TWH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
+    shared_df['TSH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TSH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
+    
+    # 實際支付統計
+    twh_paid = shared_df[shared_df['User'] == 'TWH']['Total_HKD'].sum()
+    tsh_paid = shared_df[shared_df['User'] == 'TSH']['Total_HKD'].sum()
+    
+    # 應支付統計 (目標)
+    twh_should_pay = shared_df['TWH_Owe'].sum()
+    tsh_should_pay = shared_df['TSH_Owe'].sum()
+    
+    # 差額 = 實際支付 - 應支付
+    # 如果為正，代表墊付了；如果為負，代表欠錢
+    balance = twh_paid - twh_should_pay
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("👨‍💻 TWH 實際墊付", f"{twh_paid:,.1f}")
+    c2.metric("💼 TSH 實際墊付", f"{tsh_paid:,.1f}")
+    
+    if balance > 0:
+        c3.success(f"💰 TSH 應給 TWH: **{abs(balance):,.1f} HKD**")
+    elif balance < 0:
+        c3.warning(f"💰 TWH 應給 TSH: **{abs(balance):,.1f} HKD**")
+    else:
+        c3.info("✅ 已平帳")
+
+    with st.expander("查看分攤明細表"):
+        st.dataframe(shared_df[['Date', 'Shop', 'Total_HKD', 'TWH_n', 'TSH_n', 'TWH_Owe', 'TSH_Owe']], use_container_width=True)
+
+# --- 4. 提交頁面 (新增工具箱 UI) ---
+
+def render_submission_page():
+    st.title("💸 提交費用")
+    mode = st.radio("模式", ["📸 OCR 收據", "✍️ 手動輸入"])
+    
+    with st.form("sub_form"):
+        user = st.selectbox("付款人", ALLOWED_USERS)
+        remarks = st.text_input("備註 (例如：幫媽媽買藥)")
+        
+        st.markdown("---")
+        st.write("🔧 **分攤工具箱**")
         col_sh, col_n1, col_n2 = st.columns([2, 2, 2])
-        is_shared = col_sh.checkbox("Split?", value=True)
-        twh_n = col_n1.number_input("TWH Members", min_value=1, value=def_twh)
-        tsh_n = col_n2.number_input("TSH Members", min_value=1, value=def_tsh)
-        s_n = st.text_input("Shop")
-        a_n = st.number_input("Amount", format="%.2f")
-        c_n = st.selectbox("Currency", AVAILABLE_CURRENCIES)
-        d_n = st.date_input("Date")
-        rem = st.text_input("Remarks")
-        if st.form_submit_button("Submit"):
-            amt_hkd, _ = convert_currency(a_n, c_n)
-            write_to_github_file({"user_name": user, "shop_name": s_n, "total_amount": amt_hkd, "transaction_date": str(d_n), "is_shared": "Yes" if is_shared else "No", "twh_n": twh_n, "tsh_n": tsh_n, "orig_amt": a_n, "orig_curr": c_n, "remarks": rem})
-            st.success("Added!")
+        is_shared = col_sh.checkbox("此筆需按人數分攤？", value=True)
+        twh_n = col_n1.number_input("TWH 分攤人數", min_value=1, value=3)
+        tsh_n = col_n2.number_input("TSH 分攤人數", min_value=1, value=4)
+        st.markdown("---")
+
+        if mode == "📸 OCR 收據":
+            up = st.file_uploader("上傳收據", type=['jpg','png','pdf'])
+        else:
+            s_n = st.text_input("商家")
+            a_n = st.number_input("金額")
+            c_n = st.selectbox("幣種", AVAILABLE_CURRENCIES)
+            d_n = st.date_input("日期")
+
+        if st.form_submit_button("確認提交"):
+            ocr_data = None
+            if mode == "📸 OCR 收據" and up:
+                with st.spinner("Gemini Lite 分析中..."):
+                    # 此處省略之前的 PDF 轉換函數，邏輯相同
+                    res = gemini_client.models.generate_content(
+                        model='gemini-3-flash-preview', # 已更新至 Gemini 3
+                        contents=["Extract vendor, amount, currency, date as JSON.", Image.open(up)],
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
+                    ocr_data = json.loads(res.text)
+            else:
+                ocr_data = {"shop_name": s_n, "total_amount": a_n, "currency": c_n, "transaction_date": str(d_n)}
+
+            if ocr_data:
+                amt_hkd, rate = convert_currency(ocr_data['total_amount'], ocr_data['currency'])
+                write_to_github_file({
+                    "user_name": user, "shop_name": ocr_data['shop_name'], "total_amount": amt_hkd,
+                    "transaction_date": ocr_data['transaction_date'], "is_shared": "Yes" if is_shared else "No",
+                    "twh_n": twh_n, "tsh_n": tsh_n, "orig_amt": ocr_data['total_amount'],
+                    "orig_curr": ocr_data['currency'], "remarks": remarks
+                })
+                st.success("記錄已儲存！")
+
+# --- 5. 主程序 ---
 
 def main():
-    st.sidebar.title("⚙️ Settings")
-    def_twh = st.sidebar.number_input("TWH Def.", value=3)
-    def_tsh = st.sidebar.number_input("TSH Def.", value=4)
-    page = st.sidebar.radio("Nav", ["Submit", "History"])
-    if page == "Submit": render_submission_page(def_twh, def_tsh)
-    else: render_history_page()
+    st.sidebar.title("🧭 選單")
+    page = st.sidebar.radio("頁面跳轉", ["提交費用", "歷史記錄"])
+    
+    # 側邊欄匯率顯示
+    rate = get_live_exchange_rate("JPY", "HKD")
+    if rate: st.sidebar.metric("1 JPY 兌 HKD", f"{rate:.4f}")
+    
+    if page == "提交費用":
+        render_submission_page()
+    else:
+        st.title("📚 歷史記錄與比例分帳")
+        df = read_and_parse_records_to_df()
+        if not df.empty:
+            display_settlement(df)
+            # 列表顯示
+            for _, r in df.iterrows():
+                st.write(f"**{r['Date']}** | {r['Shop']} | {r['Total_HKD']:.1f} HKD ({r['User']})")
+                if r['Shared'] == 'Yes':
+                    st.caption(f"👥 分攤比例 (TWH:{r['TWH_n']} 人 / TSH:{r['TSH_n']} 人)")
+                st.markdown("---")
 
 if __name__ == "__main__":
     main()
