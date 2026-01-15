@@ -1,1 +1,2 @@
 
+[2026-01-15 13:11:08] User: TSH, Shop: 7-11, Total: 98.42 HKD, Date: 2026-01-15, Shared: No, TWH_n: 3, TSH_n: 4, Orig: 2000.00 JPY, Rem: Drug
