@@ -13,14 +13,14 @@ from PIL import Image
 from github import Github
 import fitz 
 
-# --- 0. 初始化設定 ---
+# --- 0. Initial Configuration ---
 load_dotenv()
-st.set_page_config(page_title="AI 比例分帳系統 v2", layout="wide") 
+st.set_page_config(page_title="AI Proportional Splitter", layout="wide") 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY") 
-REPO_NAME = "iversonhang/travel-expense" 
+REPO_NAME = "iversonhang/travel-expense"
 FILE_PATH = "expense_records.txt"
 
 ALLOWED_USERS = ["TWH", "TSH"] 
@@ -29,15 +29,17 @@ AVAILABLE_CURRENCIES = ["HKD", "JPY"]
 
 @st.cache_resource
 def init_gemini_client():
+    if not GEMINI_API_KEY: return None
     try: return genai.Client(api_key=GEMINI_API_KEY)
     except: return None
 
 gemini_client = init_gemini_client()
 
-# --- 1. 核心輔助功能 ---
+# --- 1. Core Logic: Currency & PDF ---
 
 @st.cache_data(ttl=3600)
 def get_live_exchange_rate(from_curr, to_curr):
+    if not EXCHANGE_RATE_API_KEY: return None
     try:
         url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/pair/{from_curr}/{to_curr}"
         res = requests.get(url, timeout=5).json()
@@ -45,13 +47,25 @@ def get_live_exchange_rate(from_curr, to_curr):
     except: return None
 
 def convert_currency(amount, from_currency):
-    if from_currency == BASE_CURRENCY: return amount, 1.0
+    if from_currency == BASE_CURRENCY: return float(amount), 1.0
     rate = get_live_exchange_rate(from_currency, BASE_CURRENCY)
-    return (float(amount * rate), float(rate)) if rate else (amount, 0.0)
+    if rate: return float(amount * rate), float(rate)
+    return float(amount), 0.0
 
-# --- 2. GitHub 檔案處理 ---
+def pdf_to_images(uploaded_file):
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    page = doc.load_page(0)
+    pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.tobytes("ppm"))
+    doc.close()
+    return img
+
+# --- 2. GitHub Data Operations ---
 
 def write_to_github_file(data):
+    if not GITHUB_TOKEN: 
+        st.error("GitHub Token Missing")
+        return
     repo = Github(GITHUB_TOKEN).get_repo(REPO_NAME)
     try:
         file = repo.get_contents(FILE_PATH)
@@ -59,14 +73,16 @@ def write_to_github_file(data):
         sha = file.sha
     except: content, sha = "", None
 
+    # New Unified Log Format
     line = (f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] User: {data['user_name']}, Shop: {data['shop_name']}, "
             f"Total: {data['total_amount']:.2f} HKD, Date: {data['transaction_date']}, "
             f"Shared: {data['is_shared']}, TWH_n: {data['twh_n']}, TSH_n: {data['tsh_n']}, "
             f"Orig: {data['orig_amt']:.2f} {data['orig_curr']}, Rem: {data['remarks']}\n")
     
     new_content = content + line
-    repo.update_file(FILE_PATH, "add expense record", new_content, sha) if sha else repo.create_file(FILE_PATH, "init", new_content)
-    st.session_state.df_records = pd.DataFrame() # 強制刷新快取
+    if sha: repo.update_file(FILE_PATH, "feat: add record", new_content, sha)
+    else: repo.create_file(FILE_PATH, "init: create log", new_content)
+    st.session_state.df_records = pd.DataFrame() 
 
 def read_and_parse_records_to_df():
     try:
@@ -75,50 +91,71 @@ def read_and_parse_records_to_df():
     except: return pd.DataFrame()
     
     records = []
+    # Enhanced Regex to match the new proportional fields
     pattern = re.compile(r'^\[(?P<ts>.*?)\] User: (?P<u>.*?), Shop: (?P<s>.*?), Total: (?P<t>.*?) HKD, Date: (?P<d>.*?), Shared: (?P<sh>.*?), TWH_n: (?P<tn>\d+), TSH_n: (?P<sn>\d+), Orig: (?P<oa>.*?) (?P<oc>.*?), Rem: (?P<r>.*?)$', re.MULTILINE)
+    
     for m in pattern.finditer(content):
         d = m.groupdict()
         records.append({
-            'timestamp': pd.to_datetime(d['ts']), 'User': d['u'], 'Shop': d['s'], 
-            'Total_HKD': float(d['t']), 'Date': d['d'], 'Shared': d['sh'],
-            'TWH_n': int(d['tn']), 'TSH_n': int(d['sn']),
-            'Original': f"{d['oa']} {d['oc']}", 'Remarks': d['r']
+            'timestamp': pd.to_datetime(d['ts']), 
+            'User': d['u'], 
+            'Shop': d['s'], 
+            'Total_HKD': float(d['t']), 
+            'Date': d['d'], 
+            'Shared': d['sh'].strip(),
+            'TWH_n': int(d['tn']), 
+            'TSH_n': int(d['sn']),
+            'Original': f"{d['oa']} {d['oc']}", 
+            'Remarks': d['r']
         })
+    
+    if not records:
+        return pd.DataFrame(columns=['timestamp', 'User', 'Shop', 'Total_HKD', 'Date', 'Shared', 'TWH_n', 'TSH_n', 'Original', 'Remarks'])
+    
     return pd.DataFrame(records).sort_values('timestamp', ascending=False).reset_index(drop=True)
 
-# --- 3. 頁面渲染：提交費用 ---
+# --- 3. Page Rendering: Submission ---
 
-def render_submission_page(default_twh_n, default_tsh_n):
-    st.title("💸 提交費用")
-    mode = st.radio("選擇輸入方式", ["📸 拍照/PDF (Gemini Lite)", "✍️ 手動輸入"], horizontal=True)
+def render_submission_page(def_twh, def_tsh):
+    st.title("💸 Expense Submission")
+    mode = st.radio("Input Method", ["📸 OCR (Gemini Lite)", "✍️ Manual"], horizontal=True)
     
-    with st.form("sub_form"):
-        user = st.selectbox("付款人", ALLOWED_USERS)
-        remarks = st.text_input("備註 (可選)")
+    with st.form("main_form"):
+        user = st.selectbox("Who Paid?", ALLOWED_USERS)
+        remarks = st.text_input("Remarks (optional)")
         
-        st.info(f"💡 目前預設分攤比例為 **TWH: {default_twh_n} 人 / TSH: {default_tsh_n} 人** (可在側邊欄修改)")
-        
+        st.markdown("---")
+        st.write("🔧 **Proportional Splitting Toolbox**")
         col_sh, col_n1, col_n2 = st.columns([2, 2, 2])
-        is_shared = col_sh.checkbox("此筆需按比例分攤", value=True)
-        # 使用側邊欄傳入的預設值
-        twh_n = col_n1.number_input("TWH 參與人數", min_value=1, value=default_twh_n)
-        tsh_n = col_n2.number_input("TSH 參與人數", min_value=1, value=default_tsh_n)
+        is_shared = col_sh.checkbox("Split this expense?", value=True)
+        twh_n = col_n1.number_input("TWH Members", min_value=1, value=def_twh)
+        tsh_n = col_n2.number_input("TSH Members", min_value=1, value=def_tsh)
+        st.markdown("---")
 
-        if mode == "📸 拍照/PDF (Gemini Lite)":
-            up = st.file_uploader("上傳收據", type=['jpg','png','pdf'])
+        if mode == "📸 OCR (Gemini Lite)":
+            up = st.file_uploader("Upload Receipt (Image/PDF)", type=['jpg','png','pdf'])
         else:
             c1, c2, c3 = st.columns(3)
-            s_n = c1.text_input("商家")
-            a_n = c2.number_input("金額", format="%.2f")
-            c_n = c3.selectbox("幣種", AVAILABLE_CURRENCIES)
-            d_n = st.date_input("消費日期")
+            s_n = c1.text_input("Shop Name")
+            a_n = c2.number_input("Amount", format="%.2f")
+            c_n = c3.selectbox("Currency", AVAILABLE_CURRENCIES)
+            d_n = st.date_input("Date")
 
-        if st.form_submit_button("🚀 提交記錄"):
+        if st.form_submit_button("Submit Record"):
             ocr_data = None
-            if mode == "📸 拍照/PDF (Gemini Lite)" and up:
-                with st.spinner("AI 正在分析收據..."):
-                    # 這裡執行 Gemini Lite OCR 邏輯 (省略圖片處理細節)
-                    ocr_data = {"shop_name": "AI 辨識店", "total_amount": 1000, "currency": "JPY", "transaction_date": "2024-01-15"}
+            if mode == "📸 OCR (Gemini Lite)" and up:
+                with st.spinner("Gemini Flash-Lite is analyzing..."):
+                    img = pdf_to_images(up) if up.type=="application/pdf" else Image.open(up)
+                    prompt = "Extract from receipt: vendor as 'shop_name', total amount as 'total_amount', currency (3-letter), date (YYYY-MM-DD). JSON format only."
+                    try:
+                        res = gemini_client.models.generate_content(
+                            model='gemini-2.5-flash-lite', 
+                            contents=[prompt, img],
+                            config=types.GenerateContentConfig(response_mime_type="application/json")
+                        )
+                        ocr_data = json.loads(res.text)
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
             else:
                 ocr_data = {"shop_name": s_n, "total_amount": a_n, "currency": c_n, "transaction_date": str(d_n)}
 
@@ -130,61 +167,84 @@ def render_submission_page(default_twh_n, default_tsh_n):
                     "twh_n": twh_n, "tsh_n": tsh_n, "orig_amt": ocr_data['total_amount'],
                     "orig_curr": ocr_data['currency'], "remarks": remarks
                 })
-                st.success("✅ 記錄已存檔！")
+                st.success("✅ Recorded successfully!")
 
-# --- 4. 頁面渲染：歷史記錄 ---
+# --- 4. Page Rendering: History & Settlement ---
 
 def render_history_page():
-    st.title("📚 歷史記錄與分帳")
+    st.title("📚 History & Settlement")
     df = read_and_parse_records_to_df()
     
     if df.empty:
-        st.warning("目前沒有任何記錄。")
+        st.info("No records found yet.")
         return
 
-    # 結算看板
+    # Proportional Calculation logic
     shared_df = df[df['Shared'] == 'Yes'].copy()
     if not shared_df.empty:
+        # Calculate how much TWH and TSH OWE for each specific transaction
         shared_df['TWH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TWH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
+        shared_df['TSH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TSH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
+        
+        # Calculate how much each party PAID
         twh_paid = shared_df[shared_df['User'] == 'TWH']['Total_HKD'].sum()
         twh_should = shared_df['TWH_Owe'].sum()
-        balance = twh_paid - twh_should
-
-        st.markdown(f"### 🤝 當前結算")
+        
+        balance = twh_paid - twh_should # If positive, TWH is owed money.
+        
+        st.subheader("🤝 Settlement Summary (HKD)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("TWH Total Paid", f"{twh_paid:,.1f}")
+        c2.metric("TWH Target Share", f"{twh_should:,.1f}")
+        
         if balance > 0:
-            st.success(f"**TSH 應支付給 TWH: {abs(balance):,.1f} HKD**")
+            c3.success(f"👉 **TSH pays TWH: {abs(balance):,.1f} HKD**")
         elif balance < 0:
-            st.warning(f"**TWH 應支付給 TSH: {abs(balance):,.1f} HKD**")
+            c3.warning(f"👉 **TWH pays TSH: {abs(balance):,.1f} HKD**")
         else:
-            st.info("雙方已清帳")
-    
-    st.markdown("---")
-    for _, r in df.iterrows():
-        st.write(f"**{r['Date']}** | {r['Shop']} | **{r['Total_HKD']:.1f} HKD** ({r['User']})")
-        if r['Shared'] == 'Yes':
-            st.caption(f"👥 分攤比例: TWH({r['TWH_n']}) : TSH({r['TSH_n']})")
-        st.markdown("<hr style='margin:0.2em 0'>", unsafe_allow_html=True)
+            c3.info("✅ All settled up!")
 
-# --- 5. 主程序與側邊欄設定 ---
+    st.markdown("---")
+    st.subheader("📋 Detailed Logs")
+    
+    # Optional JPY Reference Rate for display
+    rate_jpy_hkd = get_live_exchange_rate("JPY", "HKD")
+
+    for _, r in df.iterrows():
+        # Display dual currency for visual clarity
+        val_jpy = (r['Total_HKD'] / rate_jpy_hkd) if rate_jpy_hkd else 0
+        
+        with st.container():
+            col_a, col_b = st.columns([7, 3])
+            with col_a:
+                st.markdown(f"**{r['Date']}** | **{r['Shop']}**")
+                st.caption(f"Paid by {r['User']} | Orig: {r['Original']} | {r['Remarks']}")
+            with col_b:
+                st.markdown(f"**{r['Total_HKD']:,.1f} HKD**")
+                st.caption(f"(≈ ¥{val_jpy:,.0f} JPY)")
+                if r['Shared'] == 'Yes':
+                    st.markdown(f"<small>👥 Split Ratio {r['TWH_n']}:{r['TSH_n']}</small>", unsafe_allow_html=True)
+            st.divider()
+
+# --- 5. Main Loop with Sidebar Settings ---
 
 def main():
-    # --- 側邊欄設定區 ---
-    st.sidebar.title("⚙️ 系統設定")
+    st.sidebar.title("⚙️ Travel Settings")
     
-    with st.sidebar.expander("👥 常用分攤人數設定", expanded=True):
-        default_twh_n = st.number_input("TWH 預設人數", min_value=1, value=3)
-        default_tsh_n = st.number_input("TSH 預設人數", min_value=1, value=4)
-        st.caption("這將作為每次提交費用時的預設值。")
+    with st.sidebar.expander("👥 Default Headcounts", expanded=True):
+        def_twh = st.number_input("TWH Members", min_value=1, value=3)
+        def_tsh = st.number_input("TSH Members", min_value=1, value=4)
+        st.caption("These will be pre-filled in your submission form.")
 
     st.sidebar.markdown("---")
-    page = st.sidebar.radio("切換頁面", ["提交費用", "歷史記錄"])
+    page = st.sidebar.radio("Navigation", ["Submit Expense", "View History"])
     
-    # 即時匯率
+    # Global Rate display
     rate = get_live_exchange_rate("JPY", "HKD")
-    if rate: st.sidebar.metric("1 JPY 兌 HKD", f"{rate:.4f}")
-
-    if page == "提交費用":
-        render_submission_page(default_twh_n, default_tsh_n)
+    if rate: st.sidebar.metric("Live Rate: 1 JPY", f"{rate:.4f} HKD")
+    
+    if page == "Submit Expense":
+        render_submission_page(def_twh, def_tsh)
     else:
         render_history_page()
 
