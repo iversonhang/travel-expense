@@ -15,7 +15,7 @@ import fitz
 
 # --- 0. 初始化 ---
 load_dotenv()
-st.set_page_config(page_title="AI 比例分帳系統", layout="wide") 
+st.set_page_config(page_title="AI 比例分帳系統 (Edit版)", layout="wide") 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -34,7 +34,7 @@ def init_gemini_client():
 
 gemini_client = init_gemini_client()
 
-# --- 1. 核心計算函數 ---
+# --- 1. 核心輔助功能 ---
 
 @st.cache_data(ttl=3600)
 def get_live_exchange_rate(from_curr, to_curr):
@@ -49,9 +49,47 @@ def convert_currency(amount, from_currency):
     rate = get_live_exchange_rate(from_currency, BASE_CURRENCY)
     return (float(amount * rate), float(rate)) if rate else (amount, 0.0)
 
-# --- 2. GitHub 讀寫 (新增人數欄位支援) ---
+def pdf_to_images(uploaded_file):
+    """將 PDF 第一頁轉換為圖片以供 AI 分析"""
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    page = doc.load_page(0)
+    pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.tobytes("ppm"))
+    doc.close()
+    return img
+
+# --- 2. GitHub 讀寫操作 ---
+
+def save_df_to_github(df):
+    """將編輯後的 DataFrame 轉回文字格式並儲存到 GitHub"""
+    repo = Github(GITHUB_TOKEN).get_repo(REPO_NAME)
+    try:
+        file = repo.get_contents(FILE_PATH)
+        sha = file.sha
+    except: sha = None
+
+    lines = []
+    # 確保按時間順序排序（或者保持編輯後的順序）
+    for _, r in df.iterrows():
+        # 格式化每一行，確保符合 Regex 解析規則
+        ts_str = r['timestamp'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(r['timestamp'], pd.Timestamp) else str(r['timestamp'])
+        
+        line = (f"[{ts_str}] User: {r['User']}, Shop: {r['Shop']}, "
+                f"Total: {r['Total_HKD']:.2f} HKD, Date: {r['Date']}, "
+                f"Shared: {r['Shared']}, TWH_n: {r['TWH_n']}, TSH_n: {r['TSH_n']}, "
+                f"Orig: {r['Original']}, Rem: {r['Remarks']}\n")
+        lines.append(line)
+    
+    new_content = "".join(lines)
+    
+    if sha:
+        repo.update_file(FILE_PATH, "Update/Delete via UI", new_content, sha)
+    else:
+        repo.create_file(FILE_PATH, "Init records", new_content)
+    st.success("✅ GitHub 記錄已成功更新！")
 
 def write_to_github_file(data):
+    """新增單筆記錄"""
     repo = Github(GITHUB_TOKEN).get_repo(REPO_NAME)
     try:
         file = repo.get_contents(FILE_PATH)
@@ -61,15 +99,12 @@ def write_to_github_file(data):
 
     line = (f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] User: {data['user_name']}, Shop: {data['shop_name']}, "
             f"Total: {data['total_amount']:.2f} HKD, Date: {data['transaction_date']}, "
-            f"Shared: {data['is_shared']}, TWH_n: {data['twh_n']}, TSH_n: {data['tsh_n']}, " # 存儲人數
+            f"Shared: {data['is_shared']}, TWH_n: {data['twh_n']}, TSH_n: {data['tsh_n']}, " 
             f"Orig: {data['orig_amt']:.2f} {data['orig_curr']}, Rem: {data['remarks']}\n")
     
     new_content = content + line
     if sha: repo.update_file(FILE_PATH, "add record", new_content, sha)
     else: repo.create_file(FILE_PATH, "create file", new_content)
-    st.session_state.df_records = pd.DataFrame()
-
-# --- 3. 數據解析與按比例結算 ---
 
 def read_and_parse_records_to_df():
     try:
@@ -78,59 +113,25 @@ def read_and_parse_records_to_df():
     except: return pd.DataFrame()
     
     records = []
-    # 更新正則表達式以匹配人數 TWH_n 和 TSH_n
     pattern = re.compile(r'^\[(?P<ts>.*?)\] User: (?P<u>.*?), Shop: (?P<s>.*?), Total: (?P<t>.*?) HKD, Date: (?P<d>.*?), Shared: (?P<sh>.*?), TWH_n: (?P<tn>\d+), TSH_n: (?P<sn>\d+), Orig: (?P<oa>.*?) (?P<oc>.*?), Rem: (?P<r>.*?)$', re.MULTILINE)
+    
     for m in pattern.finditer(content):
         d = m.groupdict()
         records.append({
-            'timestamp': pd.to_datetime(d['ts']), 'User': d['u'], 'Shop': d['s'], 
-            'Total_HKD': float(d['t']), 'Date': d['d'], 'Shared': d['sh'],
+            'timestamp': pd.to_datetime(d['ts']), 
+            'User': d['u'], 'Shop': d['s'], 
+            'Total_HKD': float(d['t']), 'Date': d['d'], 
+            'Shared': d['sh'].strip(), # 去除可能的空格
             'TWH_n': int(d['tn']), 'TSH_n': int(d['sn']),
             'Original': f"{d['oa']} {d['oc']}", 'Remarks': d['r']
         })
-    df = pd.DataFrame(records).sort_values('timestamp', ascending=False).reset_index(drop=True)
-    df['Record_ID'] = df.index
-    return df
-
-def display_settlement(df):
-    st.subheader("🤝 比例分帳工具箱 (Proportional Settlement)")
     
-    shared_df = df[df['Shared'] == 'Yes'].copy()
-    if shared_df.empty:
-        st.info("尚無分攤記錄。")
-        return
+    if not records:
+        return pd.DataFrame(columns=['timestamp', 'User', 'Shop', 'Total_HKD', 'Date', 'Shared', 'TWH_n', 'TSH_n', 'Original', 'Remarks'])
 
-    # 計算每筆記錄中各方應付的比例金額
-    shared_df['TWH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TWH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
-    shared_df['TSH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TSH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
-    
-    # 實際支付統計
-    twh_paid = shared_df[shared_df['User'] == 'TWH']['Total_HKD'].sum()
-    tsh_paid = shared_df[shared_df['User'] == 'TSH']['Total_HKD'].sum()
-    
-    # 應支付統計 (目標)
-    twh_should_pay = shared_df['TWH_Owe'].sum()
-    tsh_should_pay = shared_df['TSH_Owe'].sum()
-    
-    # 差額 = 實際支付 - 應支付
-    # 如果為正，代表墊付了；如果為負，代表欠錢
-    balance = twh_paid - twh_should_pay
+    return pd.DataFrame(records).sort_values('timestamp', ascending=False).reset_index(drop=True)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("👨‍💻 TWH 實際墊付", f"{twh_paid:,.1f}")
-    c2.metric("💼 TSH 實際墊付", f"{tsh_paid:,.1f}")
-    
-    if balance > 0:
-        c3.success(f"💰 TSH 應給 TWH: **{abs(balance):,.1f} HKD**")
-    elif balance < 0:
-        c3.warning(f"💰 TWH 應給 TSH: **{abs(balance):,.1f} HKD**")
-    else:
-        c3.info("✅ 已平帳")
-
-    with st.expander("查看分攤明細表"):
-        st.dataframe(shared_df[['Date', 'Shop', 'Total_HKD', 'TWH_n', 'TSH_n', 'TWH_Owe', 'TSH_Owe']], use_container_width=True)
-
-# --- 4. 提交頁面 (新增工具箱 UI) ---
+# --- 3. 頁面渲染：提交費用 ---
 
 def render_submission_page():
     st.title("💸 提交費用")
@@ -160,10 +161,10 @@ def render_submission_page():
             ocr_data = None
             if mode == "📸 OCR 收據" and up:
                 with st.spinner("Gemini Lite 分析中..."):
-                    # 此處省略之前的 PDF 轉換函數，邏輯相同
+                    img = pdf_to_images(up) if up.type=="application/pdf" else Image.open(up)
                     res = gemini_client.models.generate_content(
-                        model='gemini-3-flash-preview', # 已更新至 Gemini 3
-                        contents=["Extract vendor, amount, currency, date as JSON.", Image.open(up)],
+                        model='gemini-2.5-flash-lite', # 使用更快的 Lite 模型
+                        contents=["Extract vendor, amount, currency, date (YYYY-MM-DD) as JSON.", img],
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
                     ocr_data = json.loads(res.text)
@@ -180,29 +181,81 @@ def render_submission_page():
                 })
                 st.success("記錄已儲存！")
 
+# --- 4. 頁面渲染：歷史記錄 (含編輯功能) ---
+
+def render_history_page():
+    st.title("📚 歷史記錄與管理")
+    df = read_and_parse_records_to_df()
+    
+    if df.empty:
+        st.info("尚無記錄。")
+        return
+
+    # --- 1. 結算看板 (保持不變) ---
+    shared_df = df[df['Shared'] == 'Yes'].copy()
+    if not shared_df.empty:
+        shared_df['TWH_Owe'] = shared_df.apply(lambda r: r['Total_HKD'] * (r['TWH_n'] / (r['TWH_n'] + r['TSH_n'])), axis=1)
+        
+        twh_paid = shared_df[shared_df['User'] == 'TWH']['Total_HKD'].sum()
+        twh_should = shared_df['TWH_Owe'].sum()
+        balance = twh_paid - twh_should # 正數代表 TWH 墊付了，TSH 欠錢
+
+        st.subheader("🤝 即時結算 (HKD)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("TWH 已付總額", f"{twh_paid:,.1f}")
+        c2.metric("TWH 應付份額", f"{twh_should:,.1f}")
+        
+        if balance > 0:
+            c3.success(f"💰 **TSH 需支付給 TWH: {abs(balance):,.1f}**")
+        elif balance < 0:
+            c3.warning(f"💰 **TWH 需支付給 TSH: {abs(balance):,.1f}**")
+        else:
+            c3.info("✅ 目前已平帳")
+
+    st.markdown("---")
+
+    # --- 2. 互動式編輯表 ---
+    st.subheader("📝 編輯或刪除記錄")
+    st.caption("說明：直接點擊表格內容進行修改。若要**刪除**，請選取該行左側並按下鍵盤的 Delete 鍵。完成後請點擊下方按鈕同步。")
+
+    # 設定欄位顯示屬性
+    edited_df = st.data_editor(
+        df,
+        column_config={
+            "timestamp": None, # 隱藏內部時間戳
+            "User": st.column_config.SelectboxColumn("付款人", options=ALLOWED_USERS, required=True),
+            "Shop": st.column_config.TextColumn("商家名稱"),
+            "Total_HKD": st.column_config.NumberColumn("金額 (HKD)", format="%.2f"),
+            "Shared": st.column_config.SelectboxColumn("是否分攤", options=["Yes", "No"]),
+            "TWH_n": st.column_config.NumberColumn("TWH 人數", min_value=1),
+            "TSH_n": st.column_config.NumberColumn("TSH 人數", min_value=1),
+            "Original": st.column_config.TextColumn("原始金額 (參考)"),
+            "Remarks": st.column_config.TextColumn("備註"),
+        },
+        num_rows="dynamic", # 允許新增/刪除行
+        use_container_width=True,
+        key="data_editor"
+    )
+
+    # 儲存按鈕
+    if st.button("💾 將修改同步至 GitHub", type="primary"):
+        with st.spinner("正在更新雲端記錄..."):
+            save_df_to_github(edited_df)
+            st.rerun() # 重新整理頁面
+
 # --- 5. 主程序 ---
 
 def main():
     st.sidebar.title("🧭 選單")
     page = st.sidebar.radio("頁面跳轉", ["提交費用", "歷史記錄"])
     
-    # 側邊欄匯率顯示
     rate = get_live_exchange_rate("JPY", "HKD")
-    if rate: st.sidebar.metric("1 JPY 兌 HKD", f"{rate:.4f}")
+    if rate: st.sidebar.metric("匯率參考 (JPY->HKD)", f"{rate:.4f}")
     
     if page == "提交費用":
         render_submission_page()
     else:
-        st.title("📚 歷史記錄與比例分帳")
-        df = read_and_parse_records_to_df()
-        if not df.empty:
-            display_settlement(df)
-            # 列表顯示
-            for _, r in df.iterrows():
-                st.write(f"**{r['Date']}** | {r['Shop']} | {r['Total_HKD']:.1f} HKD ({r['User']})")
-                if r['Shared'] == 'Yes':
-                    st.caption(f"👥 分攤比例 (TWH:{r['TWH_n']} 人 / TSH:{r['TSH_n']} 人)")
-                st.markdown("---")
+        render_history_page()
 
 if __name__ == "__main__":
     main()
