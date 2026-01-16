@@ -1,3 +1,0 @@
-[2026-01-15 13:14:02] User: TSH, Shop: ok, Total: 147.63 HKD, Date: 2026-01-15, Shared: Yes, TWH_n: 3, TSH_n: 4, Orig: 3000.00 JPY, Rem: drug
-[2026-01-15 13:13:38] User: TWH, Shop: ok, Total: 246.05 HKD, Date: 2026-01-15, Shared: Yes, TWH_n: 3, TSH_n: 4, Orig: 5000.00 JPY, Rem: Drug
-[2026-01-15 13:11:08] User: TSH, Shop: 7-11, Total: 98.42 HKD, Date: 2026-01-15, Shared: No, TWH_n: 3, TSH_n: 4, Orig: 2000.00 JPY, Rem: Drug
